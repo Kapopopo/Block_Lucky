@@ -1,6 +1,16 @@
 # BlockLucky ✳
 
-Loterie pédagogique de la ville fictive d’EtherBay, réalisée à partir du brief « KO Projet BlockLucky-3 ». Interface française, thème sombre noir et violet, avec animations et respect de la préférence de réduction des mouvements, responsive mobile/ordinateur.
+Loterie pédagogique de la ville fictive d’EtherBay, réalisée à partir du brief « KO Projet BlockLucky-3 ». Interface française de type « dashboard wallet » vert émeraude, thèmes clair et sombre (selon le système, avec bascule), animations respectant la préférence de réduction des mouvements, responsive mobile/ordinateur.
+
+## Interface
+
+- **Tuto guidé** au premier lancement : un projecteur éclaire chaque zone (le reste est assombri), avec Précédent / Suivant / « Passer le tuto ». Relançable depuis la barre latérale, les Réglages ou les Règles.
+- **Aide pour débutant** : infobulles « ? » sur les termes techniques, lexique dans « Règles & lexique », messages d’erreur du contrat traduits en français.
+- **Mode blockchain guidé** : bannière indiquant l’action suivante (programmer, lancer le tirage, retirer, rembourser), cycle du tirage en 5 étapes, suivi de chaque transaction (signature → validation → confirmation, lien Etherscan sur Sepolia).
+- **Tirage vérifiable** : le ticket gagnant est recalculé dans le navigateur à partir du hash du bloc programmé.
+- **Animations** : billet qui sort du porte-monnaie, tickets qui volent vers « Mes tickets », compteurs animés, révélation du tirage façon machine à sous avec confettis en cas de gain.
+
+Fichiers du front : `public/index.html`, `public/style.css`, `public/app.js` (données et rendu), `public/fx.js` (effets), `public/tour.js` (tuto).
 
 ## Lancer l’application
 
@@ -68,6 +78,17 @@ Le gagnant appelle `withdraw()` pour recevoir la cagnotte. Si personne n’a eff
 ### Limite de l’aléatoire blockchain
 
 Ce contrat est **un prototype pédagogique à ethers fictifs, sans audit**. Le hash d’un bloc futur peut être biaisé par un validateur. Ce mécanisme ne garantit pas l’impartialité requise pour une loterie avec de vrais enjeux. Voir la [documentation de sécurité Solidity](https://docs.soliditylang.org/en/latest/security-considerations.html#private-information-and-randomness). Une exploitation publique demanderait un oracle VRF vérifiable, une stratégie d’expiration adaptée à cet oracle, un audit indépendant et l’analyse du cadre applicable. Ne pas envoyer d’argent réel.
+
+## Déployer sur le testnet Sepolia
+
+Sepolia est une blockchain publique de test : les transactions sont visibles par tous sur [sepolia.etherscan.io](https://sepolia.etherscan.io), mais l’ETH n’a aucune valeur.
+
+1. Créer dans MetaMask un compte **dédié aux tests** et le créditer gratuitement via un faucet Sepolia (par exemple Google Cloud Web3 faucet ou Alchemy faucet).
+2. Copier `.env.example` en `.env` puis renseigner `SEPOLIA_RPC_URL` et la clé privée de ce compte (`DEPLOYER_PRIVATE_KEY`). Le fichier `.env` est ignoré par git.
+3. Lancer `npm run deploy:sepolia`. Le script refuse tout autre réseau que 11155111 et affiche le lien Etherscan du contrat.
+4. Lancer `npm run dev`, sélectionner Sepolia dans MetaMask, puis choisir « Blockchain » dans les Paramètres.
+
+Ne jamais mettre dans `.env` la clé d’un compte qui détient de vrais fonds.
 
 ## Validation
 

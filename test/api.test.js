@@ -8,7 +8,7 @@ async function fixture(t,options={}){
  const dir=mkdtempSync(path.join(tmpdir(),'blocklucky-'));const server=createApp({file:path.join(dir,'state.json'),...options}).listen(0,'127.0.0.1');await new Promise(r=>server.on('listening',r));
  t.after(()=>{server.closeAllConnections();server.close();rmSync(dir,{recursive:true,force:true});});
  const base=`http://127.0.0.1:${server.address().port}`;
- const makeClient=()=>{let cookie='';const call=async(url,body)=>{const res=await fetch(base+url,{method:body?'POST':'GET',headers:{cookie,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(res.headers.get('set-cookie'))cookie=res.headers.get('set-cookie').split(';')[0];return {status:res.status,data:await res.json()};};call.newSession=makeClient;return call;};
+ const makeClient=()=>{let cookie='';const call=async(url,body)=>{const res=await fetch(base+url,{method:body?'POST':'GET',headers:{cookie,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(res.headers.get('set-cookie'))cookie=res.headers.get('set-cookie').split(';')[0];return {status:res.status,data:await res.json()};};call.newSession=makeClient;call.base=base;return call;};
  return makeClient();
 }
 test('achat validé, solde débité et chances cohérentes',async t=>{const call=await fixture(t);assert.equal((await call('/api/state')).data.balance,1);assert.equal((await call('/api/tickets',{quantity:5})).status,201);const {data}=await call('/api/state');assert.equal(data.balance,.95);assert.equal(data.myTickets,5);assert.equal(data.pot,.05);assert.equal(data.participants,1);});
@@ -45,4 +45,57 @@ test('tirage multi-participants : archives, numéro gagnant et notifications pri
  await first('/api/notifications/read',{ids:[b.notifications[0].id]});assert.equal((await second('/api/state')).data.notifications[0].read,false);
  await first('/api/notifications/read',{ids:[a.notifications[0].id]});a=(await first('/api/state')).data;assert.equal(a.notifications[0].read,true);
  assert.equal((await first('/api/notifications/read',{ids:'all'})).status,400);
+});
+
+// --- Cas limites supplémentaires ---
+
+test('solde insuffisant : achat refusé sans débit',async t=>{
+ const call=await fixture(t,{capacity:500});
+ for(let i=0;i<5;i++)assert.equal((await call('/api/tickets',{quantity:20})).status,201);
+ assert.equal((await call('/api/state')).data.balance,0);
+ const refused=await call('/api/tickets',{quantity:1});
+ assert.equal(refused.status,400);assert.equal(refused.data.error,'Solde insuffisant.');
+ const {data}=await call('/api/state');assert.equal(data.balance,0);assert.equal(data.myTickets,100);
+});
+
+test('anti-CSRF : un POST venant d’un autre site est refusé',async t=>{
+ const call=await fixture(t);await call('/api/state');
+ const res=await fetch(call.base+'/api/tickets',{method:'POST',headers:{'Content-Type':'application/json',origin:'https://pirate.example'},body:JSON.stringify({quantity:1})});
+ assert.equal(res.status,403);
+});
+
+test('JSON invalide ou trop volumineux : réponse 400',async t=>{
+ const call=await fixture(t);
+ const bad=await fetch(call.base+'/api/tickets',{method:'POST',headers:{'Content-Type':'application/json'},body:'{pas du json'});
+ assert.equal(bad.status,400);
+ const big=await fetch(call.base+'/api/tickets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({quantity:1,x:'a'.repeat(5000)})});
+ assert.equal(big.status,400);
+});
+
+test('tirage sans ticket à l’échéance : pas de gagnant, compte à rebours relancé',async t=>{
+ const call=await fixture(t,{duration:100});
+ const before=(await call('/api/state')).data.endsAt;
+ await new Promise(r=>setTimeout(r,130));
+ const {data}=await call('/api/state');
+ assert.equal(data.round,1);assert.equal(data.history.length,0);assert.ok(data.endsAt>before);
+});
+
+test('deux sessions : la cagnotte cumule les deux joueurs et un seul gagne',async t=>{
+ const first=await fixture(t,{capacity:4});const second=first.newSession();
+ await first('/api/tickets',{quantity:2});await second('/api/tickets',{quantity:2});
+ const a=(await first('/api/state')).data,b=(await second('/api/state')).data;
+ assert.equal(a.history[0].prize,.04);
+ assert.equal(Math.round((a.balance+b.balance)*100),200); // l’argent total est conservé
+ assert.ok((a.balance===1.02)!==(b.balance===1.02));
+});
+
+test('notifications : liste trop longue refusée',async t=>{
+ const call=await fixture(t);
+ assert.equal((await call('/api/notifications/read',{ids:Array(51).fill('x')})).status,400);
+});
+
+test('configuration du contrat : null (et pas 404) tant que rien n’est déployé',async t=>{
+ const call=await fixture(t,{contractFile:path.join(tmpdir(),'absent-'+Date.now()+'.json')});
+ const res=await fetch(call.base+'/contract.json');
+ assert.equal(res.status,200);assert.equal(await res.json(),null);
 });
