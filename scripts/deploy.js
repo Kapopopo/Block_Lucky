@@ -1,0 +1,12 @@
+import {JsonRpcProvider,ContractFactory} from 'ethers';
+import {writeFileSync} from 'node:fs';
+import {compile} from './compile.js';
+const provider = new JsonRpcProvider(process.env.RPC_URL || 'http://127.0.0.1:8545');
+const network = await provider.getNetwork();
+if (network.chainId !== 31337n) throw new Error('Déploiement autorisé uniquement sur le réseau local 31337.');
+const compiled = compile();
+const contract = await new ContractFactory(compiled.abi,compiled.evm.bytecode.object,await provider.getSigner()).deploy(3600,100);
+await contract.waitForDeployment();
+const config = {address:await contract.getAddress(),chainId:Number(network.chainId),abi:compiled.abi};
+writeFileSync(new URL('../public/contract.json',import.meta.url),JSON.stringify(config,null,2));
+console.log('Contrat local déployé :',config.address);
