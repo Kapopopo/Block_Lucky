@@ -150,3 +150,5 @@ Variables d’environnement utiles : `PORT`, `DATA_FILE` (fichier d’état dém
 ## Livrable de soutenance
 
 Voir [docs/SOUTENANCE.md](docs/SOUTENANCE.md) pour le scénario de présentation, la réponse aux attentes de la ville, les indicateurs et les limites.
+
+Voir [docs/PRESENTATION.md](docs/PRESENTATION.md) pour la présentation complète du projet, la liste des fonctionnalités et le lexique.
