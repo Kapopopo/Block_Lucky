@@ -37,6 +37,13 @@
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-megaphone" viewBox="0 0 24 24"><path d="M4 10v4a1 1 0 0 0 1 1h2l5 4V5L7 9H5a1 1 0 0 0-1 1Z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5.5c0 4.4 3 8.2 7 9.5 4-1.3 7-5.1 7-9.5V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-fox" viewBox="0 0 24 24"><path d="M4 4l5 4h6l5-4-1.5 8L20 17l-8 4-8-4 1.5-5z"/><path d="M9 13.5h.1M15 13.5h.1M10.5 17h3"/></symbol>
 </svg>
 
 <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -54,6 +61,7 @@
       <a href="#history" class="nav-link" data-view="history" id="navHistory"><svg class="icon"><use href="#i-trophy"/></svg><span>Résultats</span></a>
       <a href="#settings" class="nav-link" data-view="settings" id="navSettings"><svg class="icon"><use href="#i-sliders"/></svg><span>Réglages</span></a>
       <a href="#guide" class="nav-link" data-view="guide" id="navGuide"><svg class="icon"><use href="#i-book"/></svg><span>Règles & lexique</span></a>
+      <a href="#admin" class="nav-link nav-admin" data-view="admin" id="navAdmin" data-admin-only hidden><svg class="icon"><use href="#i-shield"/></svg><span>Espace admin</span></a>
     </nav>
     <div class="side-foot">
       <button class="network-pill" data-view="settings" id="networkPill"><span class="dot"></span><span id="networkPillText">Mode démo</span></button>
@@ -77,6 +85,9 @@
         <button class="icon-button" id="notificationButton" aria-label="Notifications">
           <svg class="icon"><use href="#i-bell"/></svg><span id="notificationCount" class="count" hidden>0</span>
         </button>
+        <button class="account-button" id="accountButton" aria-label="Créer un compte ou se connecter">
+          <svg class="icon"><use href="#i-user"/></svg><span id="accountLabel">Connexion</span>
+        </button>
         <button class="wallet-button" id="wallet">
           <svg class="icon"><use href="#i-wallet"/></svg><span id="walletLabel">—</span>
         </button>
@@ -90,6 +101,7 @@
     <main id="main">
       <!-- ================= TABLEAU DE BORD ================= -->
       <section id="view-lottery" class="view" aria-labelledby="pageTitle">
+        <div id="announcementBanner" class="action-banner announcement-banner" role="status" hidden></div>
         <div id="chainBanner" class="action-banner" hidden></div>
 
         <article class="card wallet-card" id="walletCard" style="--i:0">
@@ -137,7 +149,7 @@
             </svg>
           </div>
           <div class="wallet-info">
-            <div class="eyebrow">Solde disponible
+            <div class="eyebrow"><span id="walletGreeting" class="greeting"></span>Solde disponible
               <span class="hint" tabindex="0" data-hint="L’ETH (ether) est la monnaie de la blockchain Ethereum. Ici, ce sont des ETH de test, sans aucune valeur réelle.">?</span>
             </div>
             <div class="wallet-amount"><span id="balance" class="num">0,00</span><span class="unit">ETH</span></div>
@@ -146,8 +158,10 @@
                 <span class="avatar avatar-sm" id="addressAvatar"></span><span id="addressShort">—</span><svg class="icon"><use href="#i-copy"/></svg>
               </button>
               <span class="chip chip-accent" id="networkChip"><span class="dot"></span><span id="networkChipText">Démo · ETH fictif</span></span>
+              <span class="chip chip-gold" id="verifiedChip" hidden title="Adresse vérifiée par une signature (Sign-In with Ethereum)"><svg class="icon"><use href="#i-shield"/></svg>Vérifié</span>
               <span class="hint" tabindex="0" data-hint="Ton adresse est l’identifiant public de ton portefeuille, comme un numéro de compte. Tu peux la partager sans risque.">?</span>
             </div>
+            <div id="walletSwitch" class="wallet-switch" hidden></div>
             <dl class="wallet-stats">
               <div><dt>Tickets en jeu</dt><dd id="statTickets" class="num">0</dd></div>
               <div><dt>Tirages joués</dt><dd id="statRounds" class="num">0</dd></div>
@@ -197,6 +211,7 @@
                 <button data-quantity="1">1</button><button data-quantity="5">5</button><button data-quantity="10">10</button><button data-quantity="20">20</button><button id="maxQuantity">Max</button>
               </div>
               <p class="muted small">De 1 à 20 tickets par achat.</p>
+              <p id="limitInfo" class="limit-info"></p>
             </div>
             <div class="estimate" id="estimate">
               <div class="estimate-head">
@@ -221,7 +236,6 @@
           <article class="card participation-card" id="participationCard" style="--i:3">
             <div class="card-head"><h2>Ta participation</h2><span class="status" id="participationStatus">Aucun ticket</span></div>
             <div class="participation-main">
-              <div class="ticket-stack" aria-hidden="true"><i></i><i></i><i></i></div>
               <div><strong id="mine" class="big-number num">0</strong><span id="mineLabel" class="muted">ticket</span><p id="odds" class="muted small">Achète un ticket pour participer.</p></div>
             </div>
             <div class="card-actions">
@@ -231,7 +245,7 @@
           </article>
 
           <article class="card activity-card" id="activityCard" style="--i:4">
-            <div class="card-head"><h2>Derniers achats</h2><span class="status status-live"><i></i>En direct</span></div>
+            <div class="card-head"><h2>Derniers achats</h2><span class="status" id="liveStatus">Connexion…</span></div>
             <div id="activity" class="activity-list"></div>
           </article>
         </div>
@@ -240,7 +254,7 @@
       <!-- ================= MES TICKETS ================= -->
       <section id="view-tickets" class="view" hidden>
         <div class="view-head">
-          <div><p class="eyebrow">Ta participation</p><h2 class="view-title">Mes tickets</h2></div>
+          <div><h2 class="view-title">Mes tickets</h2><p class="view-sub">Tes numéros du tirage en cours, tes tirages et tes opérations.</p></div>
           <div class="toolbar"><span id="ticketSummary" class="chip">Tirage en cours</span><button id="exportTickets" class="btn btn-ghost btn-sm"><svg class="icon"><use href="#i-download"/></svg>Exporter (CSV)</button></div>
         </div>
         <div id="myTickets" class="ticket-grid"></div>
@@ -265,7 +279,7 @@
       <!-- ================= RÉSULTATS ================= -->
       <section id="view-history" class="view" hidden>
         <div class="view-head">
-          <div><p class="eyebrow">Les derniers tirages</p><h2 class="view-title">Résultats</h2></div>
+          <div><h2 class="view-title">Résultats</h2><p class="view-sub">Les derniers tirages et leurs gagnants.</p></div>
           <div class="toolbar">
             <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="historySearch" type="search" placeholder="N° de tirage ou adresse" aria-label="Rechercher un résultat"></label>
             <select id="historyFilter" aria-label="Filtrer les résultats"><option value="all">Tous les résultats</option><option value="mine">Mes victoires</option></select>
@@ -277,7 +291,7 @@
 
       <!-- ================= RÉGLAGES ================= -->
       <section id="view-settings" class="view" hidden>
-        <div class="view-head"><div><p class="eyebrow">Réseau, contrat & apparence</p><h2 class="view-title">Réglages</h2></div></div>
+        <div class="view-head"><div><h2 class="view-title">Réglages</h2><p class="view-sub">Réseau, contrat et apparence.</p></div></div>
 
         <article class="card" id="networkCard">
           <div class="card-head"><h2>Mode de jeu</h2></div>
@@ -285,7 +299,7 @@
             <button class="mode-option" role="radio" data-mode="demo">
               <span class="mode-icon"><svg class="icon"><use href="#i-sparkle"/></svg></span>
               <b>Démonstration</b>
-              <span>Rien à installer. Tu reçois 1 ETH fictif. Le serveur BlockLucky tient les comptes.</span>
+              <span>Rien à installer. Crée un compte et reçois 1 ETH fictif. Le serveur BlockLucky tient les comptes.</span>
             </button>
             <button class="mode-option" role="radio" data-mode="chain">
               <span class="mode-icon"><svg class="icon"><use href="#i-cube"/></svg></span>
@@ -294,6 +308,7 @@
             </button>
           </div>
           <p id="networkDescription" class="muted small"></p>
+          <div class="card-actions"><button class="btn btn-ghost btn-sm" data-open-onboarding><svg class="icon"><use href="#i-fox"/></svg>Tuto MetaMask pas à pas</button></div>
         </article>
 
         <article class="card" id="contractCard">
@@ -311,16 +326,16 @@
             <ol id="cycleSteps" class="cycle"></ol>
             <p id="cycleHint" class="muted small"></p>
             <div class="action-row">
-              <button class="btn btn-ghost" data-chain-action="scheduleDraw" id="scheduleDraw">Programmer le tirage</button>
-              <button class="btn btn-ghost" data-chain-action="draw" id="draw">Lancer le tirage</button>
-              <button class="btn btn-ghost" data-chain-action="refund" id="refund">Me faire rembourser</button>
-              <button class="btn btn-primary" data-chain-action="withdraw" id="withdraw">Retirer mes gains</button>
+              <button class="btn btn-ghost" data-chain-action="requestDraw" id="requestDrawButton">Demander le tirage</button>
+              <button class="btn btn-ghost" data-chain-action="cancel" id="cancelDrawButton">Annuler le tirage</button>
+              <button class="btn btn-ghost" data-chain-action="refund" id="refundButton">Me faire rembourser</button>
+              <button class="btn btn-primary" data-chain-action="withdraw" id="withdrawButton">Retirer mes gains</button>
             </div>
           </div>
 
           <details class="disclosure">
             <summary>Le hasard est-il fiable ?</summary>
-            <p>Le contrat utilise l’empreinte (le « hash ») d’un bloc futur, que personne ne connaît au moment des achats. C’est suffisant pour apprendre, mais un validateur pourrait en théorie l’influencer. Pour de l’argent réel, il faudrait un oracle VRF (un hasard vérifiable fourni par un service externe) et un audit de sécurité.</p>
+            <p>Oui : le nombre aléatoire vient de l’oracle Chainlink VRF (« fonction aléatoire vérifiable »). Il arrive avec une preuve cryptographique que le contrat vérifie : ni l’admin, ni un validateur, ni Chainlink lui-même ne peuvent choisir le résultat. En local, sur Ganache, cet oracle est simulé par le serveur BlockLucky. Le contrat reste un prototype de test, sans audit de sécurité.</p>
           </details>
         </article>
 
@@ -342,8 +357,11 @@
       <!-- ================= RÈGLES & LEXIQUE ================= -->
       <section id="view-guide" class="view" hidden>
         <div class="view-head">
-          <div><p class="eyebrow">Les règles</p><h2 class="view-title">Trois étapes, c’est tout.</h2></div>
-          <button class="btn btn-ghost btn-sm" data-start-tour><svg class="icon"><use href="#i-help"/></svg>Lancer le tuto</button>
+          <div><h2 class="view-title">Trois étapes, c’est tout.</h2></div>
+          <div class="toolbar">
+            <button class="btn btn-ghost btn-sm" data-start-tour><svg class="icon"><use href="#i-help"/></svg>Lancer le tuto</button>
+            <button class="btn btn-ghost btn-sm" data-open-onboarding><svg class="icon"><use href="#i-fox"/></svg>Tuto MetaMask</button>
+          </div>
         </div>
         <div class="steps-grid">
           <article class="card step-card" style="--i:0"><b>01</b><h3>Achète tes tickets</h3><p>0,01 ETH par ticket, de 1 à 20 par achat. Chaque ticket a un numéro unique.</p></article>
@@ -373,8 +391,77 @@
             <div><dt>Frais (gas)</dt><dd>Le petit montant payé au réseau pour traiter une transaction.</dd></div>
             <div><dt>Hash</dt><dd>Une empreinte unique calculée à partir de données, impossible à deviner à l’avance.</dd></div>
             <div><dt>Testnet</dt><dd>Une blockchain publique de test, comme Sepolia, où l’ETH est gratuit.</dd></div>
+            <div><dt>Oracle</dt><dd>Un service qui apporte une information du monde extérieur à un smart contract, ici un nombre aléatoire.</dd></div>
+            <div><dt>VRF</dt><dd>« Fonction aléatoire vérifiable » : un nombre aléatoire livré avec une preuve que personne ne l’a choisi.</dd></div>
+            <div><dt>Robinet (faucet)</dt><dd>Un service qui donne gratuitement un peu d’ETH de test pour pouvoir jouer.</dd></div>
+            <div><dt>Signature</dt><dd>Preuve, produite par ton portefeuille, que tu possèdes une adresse. Signer un message est gratuit.</dd></div>
           </dl>
         </div>
+      </section>
+
+      <!-- ================= ESPACE ADMIN ================= -->
+      <section id="view-admin" class="view" hidden>
+        <div class="view-head">
+          <div><h2 class="view-title">Pilotage des tirages</h2></div>
+          <span class="chip chip-gold"><svg class="icon"><use href="#i-shield"/></svg>Administrateur</span>
+        </div>
+
+        <article class="card admin-principle" style="--i:0">
+          <div><h3>L’admin peut</h3><ul class="check-list"><li>Créer un tirage et choisir ses règles (tickets, durée, limite par joueur)</li><li>Annuler un tirage avant son résultat : chacun est remboursé</li><li>Publier des annonces pour tous les joueurs</li><li>Suivre les statistiques</li></ul></div>
+          <div><h3>L’admin ne peut pas</h3><ul class="cross-list"><li>Choisir le gagnant : c’est l’oracle de hasard qui le désigne</li><li>Clôturer les ventes avant l’heure</li><li>Prendre l’argent de la cagnotte</li></ul></div>
+        </article>
+
+        <div class="admin-grid">
+          <article class="card" id="adminDrawCard" style="--i:1">
+            <div class="card-head"><h2 id="adminDrawTitle">Tirage en cours</h2><span class="status" id="adminDrawStatus"></span></div>
+            <dl class="stat-grid" id="adminDrawSummary"></dl>
+            <p id="adminOwnerNote" class="admin-note" hidden></p>
+            <form id="adminDrawForm" class="form">
+              <h3 id="adminFormTitle">Règles du prochain tirage</h3>
+              <div class="form-row">
+                <label class="field"><span>Tickets maximum</span><input name="capacity" type="number" min="1" max="10000" required></label>
+                <label class="field"><span>Durée (minutes)</span><input name="duration" type="number" min="1" max="10080" required></label>
+                <label class="field"><span>Max par joueur</span><input name="maxPerPlayer" type="number" min="1" max="10000" required></label>
+              </div>
+              <p id="adminFormHint" class="muted small"></p>
+              <button type="submit" class="btn btn-primary" id="adminDrawSubmit">Enregistrer</button>
+            </form>
+            <div class="danger-zone" id="adminCancelZone" hidden>
+              <div><b>Annuler le tirage en cours</b><p class="muted small">Chaque joueur récupère sa mise. Aucun gagnant n’est désigné.</p></div>
+              <button class="btn btn-danger" id="adminCancel">Annuler et rembourser</button>
+            </div>
+          </article>
+
+          <article class="card" id="adminStatsCard" style="--i:2">
+            <div class="card-head"><h2>Statistiques</h2><span class="chip" id="adminStatsScope">Démo</span></div>
+            <dl class="stat-grid" id="adminStats"></dl>
+            <div class="danger-zone" id="adminResetZone" hidden>
+              <div><b>Remettre la démo à zéro</b><p class="muted small">Retour au tirage n° 1 : historique, achats et statistiques effacés. Les comptes sont conservés et repartent avec 1 ETH fictif.</p></div>
+              <button class="btn btn-danger" id="adminReset">Tout remettre à zéro</button>
+            </div>
+          </article>
+        </div>
+
+        <article class="card" id="adminOracleCard" hidden>
+          <div class="card-head"><h2>Oracle de hasard</h2><span class="chip" id="adminOracleMode"></span></div>
+          <dl class="info-list" id="adminOracleInfo"></dl>
+          <form id="adminFundForm" class="form form-inline">
+            <label class="field"><span>Alimenter la réserve (ETH)</span><input name="amount" type="number" min="0.001" step="0.001" value="0.05" required></label>
+            <button class="btn btn-ghost" type="submit">Envoyer</button>
+          </form>
+          <p class="muted small" id="adminOracleHint"></p>
+        </article>
+
+        <article class="card" id="adminAnnouncementsCard">
+          <div class="card-head"><h2>Annonces</h2><svg class="icon"><use href="#i-megaphone"/></svg></div>
+          <form id="announcementForm" class="form">
+            <label class="field"><span>Titre</span><input name="title" maxlength="80" required placeholder="Grand tirage de Noël"></label>
+            <label class="field"><span>Message</span><textarea name="message" maxlength="500" rows="3" required placeholder="Rendez-vous ce soir à 20 h pour le tirage !"></textarea></label>
+            <button class="btn btn-primary" type="submit">Publier pour tous les joueurs</button>
+          </form>
+          <p id="announcementLocked" class="admin-note" hidden></p>
+          <div id="adminAnnouncements" class="announcement-list"></div>
+        </article>
       </section>
     </main>
   </div>
@@ -394,8 +481,7 @@
 <!-- Fenêtres -->
 <dialog id="walletDialog" class="modal">
   <button class="dialog-close" data-close aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button>
-  <p class="eyebrow">Portefeuille</p>
-  <h2>Solde disponible</h2>
+  <h2>Ton portefeuille</h2>
   <div id="dialogBalance" class="dialog-amount num"></div>
   <p id="dialogDescription" class="muted small"></p>
   <code id="dialogAddress" class="address-box"></code>
@@ -405,9 +491,96 @@
   </div>
 </dialog>
 
+<dialog id="accountDialog" class="modal">
+  <button class="dialog-close" data-close aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button>
+
+  <div id="accountGuest">
+    <h2>Ton compte joueur</h2>
+    <p class="muted small">Crée ton compte gratuit pour jouer en démo : tu reçois <b>1 ETH fictif</b>. Ton solde, tes tickets et tes gains te suivent ensuite sur tous tes appareils.</p>
+    <div class="segmented tabs" role="group" aria-label="Créer un compte ou se connecter">
+      <button data-account-tab="register">Créer un compte</button><button data-account-tab="login">Se connecter</button>
+    </div>
+    <form id="registerForm" class="form">
+      <label class="field"><span>Pseudo</span><input name="pseudo" required minlength="2" maxlength="24" autocomplete="nickname" placeholder="Alice"></label>
+      <label class="field"><span>E-mail</span><input name="email" type="email" required autocomplete="email" placeholder="alice@exemple.fr"></label>
+      <label class="field"><span>Mot de passe <small class="muted">(8 caractères minimum)</small></span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <button type="submit" class="btn btn-primary btn-block">Créer mon compte</button>
+    </form>
+    <form id="loginForm" class="form" hidden>
+      <label class="field"><span>E-mail</span><input name="email" type="email" required autocomplete="email"></label>
+      <label class="field"><span>Mot de passe</span><input name="password" type="password" required autocomplete="current-password"></label>
+      <button type="submit" class="btn btn-primary btn-block">Se connecter</button>
+    </form>
+    <p id="accountError" class="form-error" role="alert" hidden></p>
+  </div>
+
+  <div id="accountProfile" hidden>
+    <div class="profile-head">
+      <span id="profileAvatar"></span>
+      <div><h2 id="profilePseudo"></h2><p id="profileEmail" class="muted small"></p><span id="profileRole" class="chip"></span></div>
+    </div>
+    <div class="dialog-actions">
+      <a class="btn btn-ghost" href="#admin" data-view="admin" data-admin-only hidden><svg class="icon"><use href="#i-shield"/></svg>Espace admin</a>
+      <button id="logoutButton" class="btn btn-ghost">Se déconnecter</button>
+    </div>
+  </div>
+
+  <div id="accountWalletProfile" hidden>
+    <div class="profile-head">
+      <span id="walletProfileAvatar"></span>
+      <div><h2 id="walletProfileAddress" class="num"></h2><p id="walletProfileText" class="muted small"></p><span id="walletProfileRole" class="chip"></span></div>
+    </div>
+    <div class="dialog-actions">
+      <a class="btn btn-ghost" href="#admin" data-view="admin" data-admin-only hidden><svg class="icon"><use href="#i-shield"/></svg>Espace admin</a>
+      <button id="showAccountForms" class="btn btn-ghost" title="Facultatif : un compte BlockLucky avec pseudo, e-mail et mot de passe"><svg class="icon"><use href="#i-user"/></svg>Ajouter un pseudo</button>
+      <button class="btn btn-ghost" data-wallet-disconnect>Se déconnecter</button>
+    </div>
+  </div>
+
+  <div id="accountWelcome" class="welcome" hidden>
+    <span class="welcome-icon"><svg class="icon"><use href="#i-sparkle"/></svg></span>
+    <h2>Compte créé !</h2>
+    <p class="muted">Prochaine étape, si tu veux : jouer sur une vraie blockchain de test avec MetaMask. Le tuto te guide pas à pas, de l’installation à ton premier ticket.</p>
+    <div class="dialog-actions">
+      <button id="welcomeLater" class="btn btn-ghost">Plus tard</button>
+      <button id="welcomeOnboarding" class="btn btn-primary"><svg class="icon"><use href="#i-fox"/></svg>Tuto MetaMask</button>
+    </div>
+  </div>
+
+  <section class="wallet-section">
+    <h3><svg class="icon"><use href="#i-shield"/></svg><span id="walletSectionTitle">Connexion avec Ethereum</span></h3>
+    <p id="walletSectionText" class="muted small"></p>
+    <div class="dialog-actions">
+      <button id="goChainButton" class="btn btn-primary" data-go-chain hidden><svg class="icon"><use href="#i-cube"/></svg>Passer en mode blockchain</button>
+      <button id="siweButton" class="btn btn-primary">Signer avec MetaMask</button>
+      <button id="walletLogoutButton" class="btn btn-ghost" data-wallet-disconnect hidden>Déconnecter MetaMask</button>
+      <button class="btn btn-ghost" data-open-onboarding><svg class="icon"><use href="#i-fox"/></svg>Tuto MetaMask</button>
+    </div>
+  </section>
+</dialog>
+
+<dialog id="onboardingDialog" class="modal modal-wide">
+  <button class="dialog-close" data-close aria-label="Fermer le tuto"><svg class="icon"><use href="#i-close"/></svg></button>
+  <h2>Tuto MetaMask</h2>
+  <p class="muted small">Chaque étape se valide toute seule dès que c’est fait. <span id="onboardingAccount"></span></p>
+  <p class="label onboarding-question">Où utilises-tu MetaMask ?</p>
+  <div class="segmented onboarding-platforms" role="group" aria-label="Où utilises-tu MetaMask ?">
+    <button data-platform="extension"><svg class="icon"><use href="#i-monitor"/></svg>Extension</button>
+    <button data-platform="mobile"><svg class="icon"><use href="#i-phone"/></svg>App mobile</button>
+    <button data-platform="web"><svg class="icon"><use href="#i-globe"/></svg>Application web</button>
+  </div>
+  <p id="onboardingIntro" class="onboarding-intro small"></p>
+  <div class="onboarding-progress"><i id="onboardingProgress"></i></div>
+  <p class="label" id="onboardingCount"></p>
+  <ol id="onboardingSteps" class="onboarding-steps"></ol>
+  <div id="onboardingDone" class="welcome" hidden>
+    <h2>Tout est prêt !</h2>
+    <div class="dialog-actions"><button id="onboardingFinish" class="btn btn-primary">Aller au tableau de bord</button></div>
+  </div>
+</dialog>
+
 <dialog id="purchaseDialog" class="modal">
   <button class="dialog-close" data-close aria-label="Fermer le récapitulatif"><svg class="icon"><use href="#i-close"/></svg></button>
-  <p class="eyebrow">Récapitulatif</p>
   <h2>Confirmer l’achat</h2>
   <div id="purchaseSummary" class="summary"></div>
   <p id="purchaseNetwork" class="muted small"></p>
@@ -419,7 +592,6 @@
 </dialog>
 
 <dialog id="txDialog" class="modal">
-  <p class="eyebrow">Transaction blockchain</p>
   <h2 id="txTitle">Transaction</h2>
   <p id="txDescription" class="muted small"></p>
   <ol id="txSteps" class="tx-steps"></ol>
@@ -427,14 +599,12 @@
 
 <dialog id="notificationsDialog" class="modal">
   <button class="dialog-close" data-close aria-label="Fermer les notifications"><svg class="icon"><use href="#i-close"/></svg></button>
-  <p class="eyebrow">Ton activité</p>
   <h2>Notifications</h2>
   <div id="notificationList" class="notification-list"></div>
 </dialog>
 
 <dialog id="resultDialog" class="modal">
   <button class="dialog-close" data-close aria-label="Fermer le résultat"><svg class="icon"><use href="#i-close"/></svg></button>
-  <p class="eyebrow">Résultat du tirage</p>
   <h2 id="resultTitle"></h2>
   <div id="resultDetails"></div>
 </dialog>

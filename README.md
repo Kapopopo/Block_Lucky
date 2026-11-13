@@ -1,16 +1,6 @@
 # BlockLucky ✳
 
-Loterie pédagogique de la ville fictive d’EtherBay, réalisée à partir du brief « KO Projet BlockLucky-3 ». Interface française de type « dashboard wallet » vert émeraude, thèmes clair et sombre (selon le système, avec bascule), animations respectant la préférence de réduction des mouvements, responsive mobile/ordinateur.
-
-## Interface
-
-- **Tuto guidé** au premier lancement : un projecteur éclaire chaque zone (le reste est assombri), avec Précédent / Suivant / « Passer le tuto ». Relançable depuis la barre latérale, les Réglages ou les Règles.
-- **Aide pour débutant** : infobulles « ? » sur les termes techniques, lexique dans « Règles & lexique », messages d’erreur du contrat traduits en français.
-- **Mode blockchain guidé** : bannière indiquant l’action suivante (programmer, lancer le tirage, retirer, rembourser), cycle du tirage en 5 étapes, suivi de chaque transaction (signature → validation → confirmation, lien Etherscan sur Sepolia).
-- **Tirage vérifiable** : le ticket gagnant est recalculé dans le navigateur à partir du hash du bloc programmé.
-- **Animations** : billet qui sort du porte-monnaie, tickets qui volent vers « Mes tickets », compteurs animés, révélation du tirage façon machine à sous avec confettis en cas de gain.
-
-Fichiers du front : `public/index.html`, `public/style.css`, `public/app.js` (données et rendu), `public/fx.js` (effets), `public/tour.js` (tuto).
+Loterie pédagogique de la ville fictive d’EtherBay, réalisée à partir du brief « KO Projet BlockLucky-3 ». Interface française de type « dashboard wallet » vert émeraude, thèmes clair et sombre, animations respectant la préférence de réduction des mouvements, responsive mobile/ordinateur. **Aucun argent réel : uniquement des ETH fictifs ou de test.**
 
 ## Lancer l’application
 
@@ -21,72 +11,73 @@ npm install
 npm run dev
 ```
 
-Ouvrir **http://localhost:3000**. Aucun compte, portefeuille externe ou clé API n’est nécessaire en démonstration. `npm start` lance le serveur sans surveillance de fichiers. La variable `PORT` change le port. Le serveur écoute uniquement sur l’interface locale.
+Ouvrir **http://localhost:3000**. Le mode démo fonctionne sans portefeuille ni clé : il suffit de créer un compte, qui reçoit 1 ETH fictif (un invité a un portefeuille vide). `npm start` lance le serveur sans surveillance de fichiers. La variable `PORT` change le port. Par défaut, le serveur écoute uniquement sur l’interface locale ; `HOST=0.0.0.0` dans `.env` l’ouvre aux appareils du même Wi-Fi (pour jouer depuis un téléphone, à réserver à un réseau de confiance).
 
 ## Fonctionnalités
 
-- Tableau de bord : cagnotte, compte à rebours, capacité, participants et chances.
-- Achat de 1 à 20 tickets à 0,01 ETH fictif, avec validation côté serveur.
-- Estimation de la part après achat, quantité maximale selon le solde et les places, et choix de quantité mémorisé dans le navigateur.
-- Export CSV des tickets et des résultats ; recherche par tirage ou adresse et filtre « Mes victoires ».
-- Récapitulatif avant confirmation, contrôle du numéro de tirage et références des opérations.
-- Historique personnel des achats et gains (100 opérations récentes), filtrable dans Mes tickets.
-- Numéros de tickets dans le tirage pour le mode serveur et export du rappel de clôture au format calendrier `.ics`.
-- Navigation par URL avec retour navigateur.
-- Mes tirages : 100 participations récentes, statuts en cours/gagné/terminé, numéros conservés et détail du ticket gagnant.
-- Notifications de résultat dans l’application (50 récentes), avec lecture synchronisée côté serveur.
-- Reçus JSON privés téléchargeables pour les 100 derniers achats, avec numéros, montant et référence.
-- Protection contre le double débit lors du renvoi d’une même requête d’achat (références conservées avec les 100 derniers reçus).
-- Portefeuille de démonstration crédité initialement de 1 ETH fictif.
-- Tirage automatique à 100 tickets ou après une heure, traité au prochain appel API ; la page actualise les données toutes les dix secondes.
-- Générateur aléatoire `crypto.randomInt` en démonstration et crédit intégral de la cagnotte au gagnant.
-- Historique des tirages et activité récente, pages Mes tickets, Paramètres et guide.
-- Sessions avec cookie HttpOnly/SameSite ; stockage persistant dans `data/state.json`, écrit atomiquement. Les soldes sont calculés en unités entières de 0,01 ETH pour éviter les erreurs d’arrondi.
-- Connexion MetaMask à un contrat Solidity sur Ganache : achat, programmation, tirage, retrait et remboursement après expiration.
+### Pour les joueurs
+- **Deux modes** : démo (crédits fictifs tenus par le serveur) et blockchain (MetaMask + smart contracts, sur Ganache ou Sepolia).
+- Achat de 1 à 20 tickets à 0,01 ETH, récapitulatif avant confirmation, protection contre le double débit.
+- **Limite de tickets par joueur** et par tirage (25 par défaut), affichée sous le sélecteur et vérifiée par le serveur et par le contrat.
+- **Compte joueur** (pseudo, e-mail, mot de passe) : obligatoire pour jouer en démo, il reçoit 1 ETH fictif de bienvenue. Solde et tickets retrouvés sur tous les appareils.
+- **Connexion avec Ethereum** (Sign-In with Ethereum), en mode blockchain uniquement : signature gratuite qui prouve la possession d’une adresse. En mode démo, MetaMask n’est jamais sollicité : un bouton mène au choix « Blockchain » des Réglages.
+- **Tuto MetaMask**, trois parcours qui se valident tout seuls, choisis automatiquement selon l’appareil :
+  - **Extension** (ordinateur) : installation, réseau, signature, ETH de test, première partie ;
+  - **App mobile** : ouvrir BlockLucky dans le navigateur de l’app MetaMask (lien direct ou QR code si le site est en https, sinon adresse à taper ; en local, adresse Wi-Fi du PC) ;
+  - **Application web** (portfolio.metamask.io) : c’est un tableau de bord qui ne signe pas pour les autres sites et n’affiche pas les réseaux de test ; le tuto fait retrouver le même compte dans l’extension et vérifie que l’adresse correspond.
+- **Robinet BlockLucky** : envoi d’ETH de test, une fois par adresse vérifiée.
+- **Temps réel** : achats, tirages, annulations et annonces arrivent instantanément (Server-Sent Events).
+- Tuto guidé avec projecteur, infobulles « ? », lexique, messages d’erreur du contrat traduits.
+- Mes tickets, Mes tirages, Mes opérations, reçus JSON, export CSV, rappel calendrier `.ics`, notifications.
 
-Les archives et notifications persistantes sont disponibles en mode serveur. Le mode blockchain affiche la participation au contrat courant, son résultat et les reçus fondés sur les transactions du portefeuille connecté ; il ne dispose pas d’un indexeur multi-contrats. Les notifications sont internes à l’application, sans e-mail ni autorisation système. Les anciens achats antérieurs à l’ajout des reçus ne disposent pas rétroactivement de reçu détaillé.
+### Pour l’administrateur
+- **Espace admin** : règles des tirages (tickets, durée, limite par joueur), création d’un tirage blockchain, annulation avec remboursement de tous, annonces, statistiques, réserve de l’oracle.
+- L’admin **ne peut pas** choisir le gagnant, clôturer avant l’heure ou prendre la cagnotte.
+- **Remise à zéro de la démo** (Espace admin, double confirmation) : retour au tirage n° 1, historique et statistiques vidés, comptes conservés avec 1 ETH fictif. Serveur arrêté : `npm run reset:demo` (une copie de l’ancien état est gardée dans `data/`). La blockchain locale, elle, repart de zéro en relançant `npm run chain` puis `npm run deploy`.
+- Démo : le premier compte créé est administrateur (ou les e-mails de `ADMIN_EMAILS`). Blockchain : le propriétaire de l’usine à tirages (le compte qui a déployé).
 
-Le solde et les tickets sont associés au cookie du navigateur : effacer les cookies crée une nouvelle session. Il n’y a pas de compte utilisateur ni de récupération de portefeuille démo. Les données de démonstration et les données blockchain sont indépendantes. Le serveur démo doit tourner en **une seule instance** ; le fichier JSON n’est pas une base adaptée à un déploiement distribué ou à 10 000 utilisateurs simultanés.
+### Hasard vérifiable
+Le gagnant est désigné par **Chainlink VRF v2.5** : un nombre aléatoire accompagné d’une preuve cryptographique vérifiée par le contrat. Le ticket gagnant = reste de la division de ce nombre par le nombre de tickets, recalculable par tous (fenêtre « Détails » d’un résultat). En local, il n’existe pas de nœud Chainlink : un contrat d’imitation (`VRFCoordinatorMock`) est déployé et le serveur BlockLucky répond à la place de l’oracle.
 
-## Tester le smart contract localement
+## Jouer sur la blockchain locale (Ganache)
 
 Dans trois terminaux :
 
 ```bash
-# Terminal 1 : blockchain locale de test
-npm run chain
-
-# Terminal 2 : compilation Solidity et déploiement
-npm run deploy
-
-# Terminal 3 : application
-npm run dev
+npm run chain    # Terminal 1 : blockchain locale de test
+npm run deploy   # Terminal 2 : oracle simulé + usine à tirages + premier tirage
+npm run dev      # Terminal 3 : application
 ```
 
-Le déploiement utilise un compte déverrouillé Ganache et refuse tout réseau autre que **31337**. L’adresse et l’ABI sont écrites dans `public/contract.json`. Il n’y a pas de clé privée dans le code. Ganache affiche des comptes de test déterministes : importer l’un de ces comptes dans un profil MetaMask de développement. Ne jamais utiliser ces clés pour détenir des fonds réels.
+Le déploiement refuse tout réseau autre que **31337** et écrit les adresses et ABI dans `public/contract.json`. Il n’y a aucune clé privée dans le code. Importer dans un profil MetaMask de développement l’un des comptes de test affichés par Ganache (le compte n° 0 est l’administrateur). Ne jamais utiliser ces clés pour de vrais fonds. Après un redémarrage de Ganache : redéployer, recharger la page et réinitialiser l’activité MetaMask si les nonces sont obsolètes.
 
-Configurer MetaMask : RPC `http://127.0.0.1:8545`, identifiant `31337`, symbole `ETH`. Ouvrir « Paramètres » en bas de page, puis choisir « Blockchain locale » et autoriser la connexion. Si nécessaire, recharger après le déploiement. Après un redémarrage de Ganache, redéployer le contrat puis recharger l’application ; réinitialiser l’activité MetaMask si les nonces sont obsolètes.
+Depuis un téléphone (app MetaMask, même Wi-Fi) : mettre `HOST=0.0.0.0` dans `.env`, lancer Ganache avec `npm run chain:lan` au lieu de `npm run chain`, puis suivre le tuto « App mobile », qui affiche l’adresse à taper dans le navigateur de l’app. Le réseau ajouté à MetaMask pointe alors vers l’adresse Wi-Fi du PC. Sur Sepolia, seul `HOST` est nécessaire.
 
-Le contrat représente **un tirage** : durée 1 heure, capacité 100 tickets, 0,01 ETH par ticket. Après expiration de la durée, n’importe qui appelle `scheduleDraw()` depuis les Paramètres ; atteindre la capacité programme automatiquement le tirage. `draw()` devient disponible après le bloc programmé (`drawBlock = block de programmation + 2`). Ganache mine à chaque transaction : pour avancer pendant une démo, lancer trois fois :
+Déroulé d’un tirage blockchain :
+1. Les ventes sont ouvertes jusqu’à l’échéance ou jusqu’au dernier ticket.
+2. Au dernier ticket (ou après l’échéance, via « Demander le tirage »), le contrat demande un nombre aléatoire à l’oracle.
+3. L’oracle répond (quelques secondes en local, 1 à 2 minutes sur Sepolia) : le gagnant est désigné automatiquement.
+4. Le gagnant clique « Retirer mes gains ». L’admin crée le tirage suivant depuis l’Espace admin.
+5. Si l’oracle ne répond pas dans l’heure, n’importe qui peut annuler ; l’admin peut annuler avant le résultat. Chaque joueur se fait alors rembourser, puis retire sa mise.
+
+Pour avancer le temps pendant une démo locale :
 
 ```bash
-curl -X POST http://127.0.0.1:8545 -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","method":"evm_mine","params":[],"id":1}'
+curl -X POST http://127.0.0.1:8545 -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","method":"evm_increaseTime","params":[3601],"id":1}'
+curl -X POST http://127.0.0.1:8545 -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","method":"evm_mine","params":[],"id":2}'
 ```
-
-Le gagnant appelle `withdraw()` pour recevoir la cagnotte. Si personne n’a effectué le tirage dans la fenêtre des 256 blocs suivants, chaque acheteur peut appeler `refund()` puis `withdraw()`. Le contrat empêche les retraits et remboursements doubles. Pour une nouvelle édition blockchain, déployer un nouveau contrat. Le mode démo, lui, enchaîne automatiquement les éditions.
-
-### Limite de l’aléatoire blockchain
-
-Ce contrat est **un prototype pédagogique à ethers fictifs, sans audit**. Le hash d’un bloc futur peut être biaisé par un validateur. Ce mécanisme ne garantit pas l’impartialité requise pour une loterie avec de vrais enjeux. Voir la [documentation de sécurité Solidity](https://docs.soliditylang.org/en/latest/security-considerations.html#private-information-and-randomness). Une exploitation publique demanderait un oracle VRF vérifiable, une stratégie d’expiration adaptée à cet oracle, un audit indépendant et l’analyse du cadre applicable. Ne pas envoyer d’argent réel.
 
 ## Déployer sur le testnet Sepolia
 
-Sepolia est une blockchain publique de test : les transactions sont visibles par tous sur [sepolia.etherscan.io](https://sepolia.etherscan.io), mais l’ETH n’a aucune valeur.
+Sepolia est une blockchain publique de test : tout est visible sur [sepolia.etherscan.io](https://sepolia.etherscan.io), mais l’ETH n’a aucune valeur.
 
-1. Créer dans MetaMask un compte **dédié aux tests** et le créditer gratuitement via un faucet Sepolia (par exemple Google Cloud Web3 faucet ou Alchemy faucet).
-2. Copier `.env.example` en `.env` puis renseigner `SEPOLIA_RPC_URL` et la clé privée de ce compte (`DEPLOYER_PRIVATE_KEY`). Le fichier `.env` est ignoré par git.
-3. Lancer `npm run deploy:sepolia`. Le script refuse tout autre réseau que 11155111 et affiche le lien Etherscan du contrat.
-4. Lancer `npm run dev`, sélectionner Sepolia dans MetaMask, puis choisir « Blockchain » dans les Paramètres.
+1. Créer dans MetaMask un compte **dédié aux tests** et le créditer via un faucet Sepolia (le tuto MetaMask de l’application en propose).
+2. Copier `.env.example` en `.env` et renseigner `SEPOLIA_RPC_URL` et `DEPLOYER_PRIVATE_KEY`. Le fichier `.env` est ignoré par git.
+3. Facultatif : `VRF_FUND_ETH=0.1` pour alimenter tout de suite la réserve de l’oracle (sinon depuis l’Espace admin).
+4. Lancer `npm run deploy:sepolia`. Le script refuse tout autre réseau que 11155111, crée l’abonnement Chainlink de l’usine et affiche les liens Etherscan et vrf.chain.link.
+5. Lancer `npm run dev`, choisir Sepolia dans MetaMask, puis le mode Blockchain dans les Réglages.
+
+Coordinateur Chainlink VRF v2.5 sur Sepolia : `0x9DdfaCa8183c41ad55329BdeeD9F6A8d53168B1B`, voie de gaz 500 gwei (source : [docs.chain.link](https://docs.chain.link/vrf/v2-5/supported-networks)). Chaque tirage consomme un peu d’ETH de test de la réserve ; si elle est vide, la demande reste en attente jusqu’à ce qu’on l’alimente.
 
 Ne jamais mettre dans `.env` la clé d’un compte qui détient de vrais fonds.
 
@@ -96,29 +87,48 @@ Ne jamais mettre dans `.env` la clé d’un compte qui détient de vrais fonds.
 npm test
 ```
 
-Les tests exécutent réellement le contrat compilé sur une blockchain Ganache éphémère : paiement incorrect, quantités invalides, clôture, tirage, retrait unique, expiration et remboursement. Les tests HTTP utilisent des fichiers temporaires et couvrent les achats, le débit, la capacité et le règlement temporel. Ils couvrent également les achats rejoués, les archives personnelles, les reçus privés et la lecture des notifications. Ils ne modifient pas les données de l’application.
+39 tests automatiques, qui ne touchent pas aux données de l’application :
+- **Contrats** (Ganache éphémère + oracle simulé) : paiement exact, limite par joueur, demande et réponse de l’oracle, seul le coordinateur peut répondre, retrait unique, annulation admin, oracle muet et remboursement, création de tirages par l’usine, réserve de l’oracle.
+- **API** : achats, débit, capacité, tirage à l’échéance, achats rejoués, reçus, notifications, anti-CSRF.
+- **Nouveautés** : comptes et blocage après 5 mauvais mots de passe, droits admin, réglages, annulation, annonces, connexion avec Ethereum (signature et anti-rejeu), robinet, temps réel.
 
 ## Structure
 
 ```text
-public/          Interface HTML/CSS/JS, ethers servi localement
-server.js        Serveur Express et API de démonstration
-contracts/       Smart contract Solidity
-scripts/         Compilation et déploiement local
-test/            Tests HTTP et blockchain
-docs/           Notes de soutenance
-data/           État démo généré, ignoré par Git
+public/          Interface : index.html, style.css, app.js (données et rendu), common.js (outils),
+                 account.js (compte), onboarding.js (tuto MetaMask), admin.js (espace admin),
+                 fx.js (effets), tour.js (visite guidée)
+server.js        Serveur Express et API
+server/          env.js, passwords.js (scrypt), siwe.js (connexion Ethereum),
+                 realtime.js (SSE), chain.js (surveillance, oracle local, robinet)
+contracts/       BlockLucky.sol (un tirage), BlockLuckyFactory.sol (usine + client VRF),
+                 IVRFCoordinatorV2Plus.sol (interface Chainlink), VRFCoordinatorMock.sol (local)
+scripts/         Compilation et déploiement
+test/            Tests contrats, API et nouveautés
+docs/            Notes de soutenance
+data/            État démo généré, ignoré par Git
 ```
 
-Aucune compilation frontend n’est requise. Les polices Google Fonts sont optionnelles ; l’interface utilise des polices système si elles ne sont pas disponibles. Aucun actif visuel externe n’est requis.
+Variables d’environnement utiles : `PORT`, `DATA_FILE` (fichier d’état démo), `CONTRACT_FILE` (configuration des contrats), et celles décrites dans `.env.example`.
 
-## API de démonstration
+## API
 
-- `GET /api/state` : session, état du tirage, solde, activité et historique.
-- `POST /api/tickets` avec `{"quantity": 5, "round": 1, "requestId": "0123456789abcdef0123456789abcdef"}` : achat avec contrôle du tirage et référence anti-doublon. L’interface génère cette référence automatiquement.
-- `GET /api/receipts/:id` : reçu du propriétaire de la session uniquement.
-- `POST /api/notifications/read` avec `{"ids": ["identifiant"]}` : marquer les notifications consultées comme lues.
-- `GET /contract-source` : source Solidity lisible.
+- `GET /api/state` : tirage démo courant, solde, activité, historique, règles.
+- `POST /api/tickets` `{"quantity", "round", "requestId"}` : achat (limite par joueur, anti-doublon).
+- `GET /api/session` : compte, adresse vérifiée, rôle admin, annonces, état du robinet.
+- `POST /api/account/register` · `/login` · `/logout` : comptes (mots de passe hachés avec scrypt).
+- `POST /api/wallet/challenge` puis `/api/wallet/verify` : connexion avec Ethereum (EIP-4361).
+- `POST /api/faucet` : ETH de test pour l’adresse vérifiée, une fois.
+- `GET /api/stream` : flux temps réel (Server-Sent Events).
+- `GET /api/admin/stats`, `POST /api/admin/settings`, `POST /api/admin/cancel`, `POST|DELETE /api/admin/announcements` : espace admin.
+- `GET /api/receipts/:id`, `POST /api/notifications/read`, `GET /contract-source`, `GET /contract.json`.
+
+## Limites connues
+
+- Prototype pédagogique sans audit : ne jamais l’utiliser avec de l’argent réel (une loterie payante est par ailleurs très réglementée en France).
+- Le mode démo reste centralisé : son historique n’est pas une preuve blockchain. Un serveur unique et un fichier JSON ne conviennent pas à 10 000 joueurs simultanés.
+- Sans vérification d’e-mail, une personne peut créer plusieurs comptes.
+- La fin d’un délai ne déclenche pas de transaction toute seule sur la blockchain : quelqu’un doit cliquer « Demander le tirage » (une automatisation Chainlink pourrait le faire).
 
 ## Livrable de soutenance
 

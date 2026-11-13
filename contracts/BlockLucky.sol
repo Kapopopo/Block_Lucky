@@ -1,143 +1,179 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @title BlockLucky — loterie pédagogique (un contrat = un tirage)
-/// @notice Prototype de test. Le hash d'un bloc futur peut être biaisé par un validateur :
-/// ne jamais utiliser ce mécanisme avec de vrais fonds. En production : un oracle VRF vérifiable.
+/// @notice Ce que le tirage a besoin de connaître de l'usine qui l'a créé.
+interface IBlockLuckyFactory {
+    function owner() external view returns (address);
+    function requestRandomness() external returns (uint256 requestId);
+}
+
+/// @title BlockLucky — un tirage de la loterie pédagogique
+/// @notice Créé par BlockLuckyFactory. Le hasard vient de l'oracle Chainlink VRF :
+/// un nombre aléatoire accompagné d'une preuve que personne (ni l'admin, ni un validateur) n'a pu le choisir.
+/// Prototype de test, sans audit : ne jamais l'utiliser avec de l'argent réel.
 contract BlockLucky {
     // ---------------------------------------------------------------------
-    // Configuration
+    // Règles fixes
     // ---------------------------------------------------------------------
 
-    /// Prix d'un ticket.
     uint256 public constant TICKET_PRICE = 0.01 ether;
-    /// Nombre maximum de tickets par achat.
     uint256 public constant MAX_TICKETS_PER_PURCHASE = 20;
-    /// L'EVM ne fournit le hash que des 256 derniers blocs.
-    uint256 public constant DRAW_WINDOW = 256;
+    /// Si l'oracle ne répond pas dans ce délai, n'importe qui peut annuler le tirage (remboursement).
+    uint256 public constant ORACLE_TIMEOUT = 1 hours;
 
-    /// Date de fin des ventes (timestamp Unix).
-    uint256 public immutable deadline;
-    /// Nombre maximum de tickets pour ce tirage.
-    uint256 public immutable maxTickets;
+    /// Ouvert → Tirage demandé à l'oracle → Gagnant désigné, ou Annulé (remboursement).
+    enum Status { Open, Drawing, Settled, Cancelled }
+
+    // ---------------------------------------------------------------------
+    // Configuration choisie par l'admin à la création
+    // ---------------------------------------------------------------------
+
+    IBlockLuckyFactory public immutable factory;
+    uint256 public immutable round;               // numéro du tirage (1, 2, 3…)
+    uint256 public immutable deadline;            // fin des ventes (timestamp Unix)
+    uint256 public immutable maxTickets;          // tickets maximum pour ce tirage
+    uint256 public immutable maxTicketsPerPlayer; // limite par adresse, pour l'équité
 
     // ---------------------------------------------------------------------
     // État
     // ---------------------------------------------------------------------
 
-    /// Une case par ticket vendu, contenant l'adresse de son propriétaire.
-    address[] public tickets;
-    /// Nombre de tickets achetés par chaque joueur (sert au remboursement).
+    Status public status;
+    address[] public tickets;                     // une case par ticket : l'adresse de son propriétaire
     mapping(address => uint256) public ticketCount;
-    /// Montant que chaque joueur peut retirer (gain ou remboursement).
-    mapping(address => uint256) public credits;
-    /// Bloc dont le hash désignera le gagnant (0 = tirage pas encore programmé).
-    uint256 public drawBlock;
-    /// Vrai une fois le gagnant désigné.
-    bool public settled;
-    /// Adresse du gagnant.
+    mapping(address => uint256) public credits;   // montants à retirer (gain ou remboursement)
+    uint256 public requestId;                     // identifiant de la requête envoyée à l'oracle
+    uint256 public drawRequestedAt;
+    uint256 public randomWord;                    // nombre aléatoire fourni par l'oracle
+    uint256 public winningTicket;                 // numéro du ticket gagnant (à partir de 1)
     address public winner;
 
     // ---------------------------------------------------------------------
-    // Événements (journal public lisible par l'interface)
+    // Événements (journal public lu par l'interface)
     // ---------------------------------------------------------------------
 
-    event TicketPurchased(address indexed player, uint256 quantity);
-    event DrawScheduled(uint256 blockNumber);
-    event WinnerSelected(address indexed player, uint256 prize);
+    event TicketPurchased(address indexed player, uint256 quantity, uint256 firstTicket);
+    event DrawRequested(uint256 indexed requestId);
+    event WinnerSelected(address indexed player, uint256 prize, uint256 winningTicket, uint256 randomWord);
+    event LotteryCancelled(address indexed by);
     event Refunded(address indexed player, uint256 amount);
     event Withdrawn(address indexed player, uint256 amount);
 
-    /// @param duration Durée des ventes en secondes.
-    /// @param capacity Nombre maximum de tickets (1 à 10 000).
-    constructor(uint256 duration, uint256 capacity) {
-        require(duration > 0 && capacity > 0 && capacity <= 10000, "Invalid configuration");
-        deadline = block.timestamp + duration;
-        maxTickets = capacity;
+    modifier onlyFactory() {
+        require(msg.sender == address(factory), "Only factory");
+        _;
     }
 
-    /// Nombre de tickets vendus.
+    constructor(address factory_, uint256 round_, uint256 duration, uint256 capacity, uint256 perPlayer) {
+        require(duration > 0 && capacity > 0 && capacity <= 10000, "Invalid configuration");
+        require(perPlayer > 0 && perPlayer <= capacity, "Invalid player limit");
+        factory = IBlockLuckyFactory(factory_);
+        round = round_;
+        deadline = block.timestamp + duration;
+        maxTickets = capacity;
+        maxTicketsPerPlayer = perPlayer;
+    }
+
+    // ---------------------------------------------------------------------
+    // Lecture
+    // ---------------------------------------------------------------------
+
     function totalTickets() external view returns (uint256) {
         return tickets.length;
     }
 
-    /// Achète `quantity` tickets. Le montant envoyé doit être exact.
+    /// Un tirage est « actif » tant qu'il peut encore vendre ou attend son résultat.
+    /// Un tirage arrivé à échéance sans aucun ticket n'est plus actif.
+    function isActive() external view returns (bool) {
+        if (status == Status.Drawing) return true;
+        if (status != Status.Open) return false;
+        return block.timestamp < deadline || tickets.length > 0;
+    }
+
+    // ---------------------------------------------------------------------
+    // Achat
+    // ---------------------------------------------------------------------
+
     function buyTickets(uint256 quantity) external payable {
-        require(block.timestamp < deadline && drawBlock == 0 && !settled, "Sales closed");
+        require(status == Status.Open && block.timestamp < deadline, "Sales closed");
         require(
-            quantity > 0 &&
-                quantity <= MAX_TICKETS_PER_PURCHASE &&
-                tickets.length + quantity <= maxTickets,
+            quantity > 0 && quantity <= MAX_TICKETS_PER_PURCHASE && tickets.length + quantity <= maxTickets,
             "Invalid quantity"
         );
+        require(ticketCount[msg.sender] + quantity <= maxTicketsPerPlayer, "Player limit reached");
         // Égalité stricte : aucun trop-perçu ne reste bloqué dans le contrat.
         require(msg.value == quantity * TICKET_PRICE, "Wrong payment");
 
+        uint256 firstTicket = tickets.length + 1;
         ticketCount[msg.sender] += quantity;
         for (uint256 i; i < quantity; ++i) {
             tickets.push(msg.sender);
         }
-        emit TicketPurchased(msg.sender, quantity);
+        emit TicketPurchased(msg.sender, quantity, firstTicket);
 
-        // Capacité atteinte : le tirage est programmé tout de suite.
-        if (tickets.length == maxTickets) {
-            _scheduleDraw();
-        }
+        // Capacité atteinte : on demande tout de suite le hasard à l'oracle.
+        if (tickets.length == maxTickets) _requestDraw();
     }
 
-    /// Après la date limite, n'importe qui peut programmer le tirage.
-    function scheduleDraw() external {
-        require(
-            block.timestamp >= deadline && tickets.length > 0 && drawBlock == 0 && !settled,
-            "Not ready"
-        );
-        _scheduleDraw();
+    // ---------------------------------------------------------------------
+    // Tirage avec Chainlink VRF
+    // ---------------------------------------------------------------------
+
+    /// Après la date limite, n'importe qui peut lancer la demande à l'oracle.
+    function requestDraw() external {
+        require(status == Status.Open && block.timestamp >= deadline && tickets.length > 0, "Not ready");
+        _requestDraw();
     }
 
-    /// Choisit un bloc futur : son hash est inconnu au moment de la programmation.
-    function _scheduleDraw() private {
-        drawBlock = block.number + 2;
-        emit DrawScheduled(drawBlock);
+    function _requestDraw() private {
+        status = Status.Drawing; // plus aucun achat possible
+        drawRequestedAt = block.timestamp;
+        requestId = factory.requestRandomness();
+        emit DrawRequested(requestId);
     }
 
-    /// Désigne le gagnant, entre le bloc programmé et 256 blocs après.
-    function draw() external {
-        require(
-            !settled &&
-                drawBlock > 0 &&
-                block.number > drawBlock &&
-                block.number <= drawBlock + DRAW_WINDOW,
-            "Draw unavailable"
-        );
-        settled = true;
-
-        uint256 random = uint256(keccak256(abi.encode(blockhash(drawBlock), address(this))));
-        winner = tickets[random % tickets.length];
-
+    /// Réponse de l'oracle, transmise par l'usine (seule autorisée).
+    function fulfillRandomness(uint256 requestId_, uint256 word) external onlyFactory {
+        require(status == Status.Drawing && requestId_ == requestId, "Unexpected randomness");
+        status = Status.Settled;
+        randomWord = word;
+        uint256 index = word % tickets.length; // reste de la division : un numéro entre 0 et N-1
+        winningTicket = index + 1;
+        winner = tickets[index];
         uint256 prize = tickets.length * TICKET_PRICE;
         credits[winner] += prize;
-        emit WinnerSelected(winner, prize);
+        emit WinnerSelected(winner, prize, winningTicket, word);
     }
 
-    /// Si personne n'a tiré dans la fenêtre de 256 blocs, chaque joueur récupère sa mise.
-    function refund() external {
-        require(!settled && drawBlock > 0 && block.number > drawBlock + DRAW_WINDOW, "Refund unavailable");
+    // ---------------------------------------------------------------------
+    // Annulation et remboursement
+    // ---------------------------------------------------------------------
 
+    /// L'admin peut annuler avant le résultat. N'importe qui peut annuler si l'oracle
+    /// n'a pas répondu dans le délai. Personne ne peut choisir le gagnant.
+    function cancel() external {
+        require(status == Status.Open || status == Status.Drawing, "Cannot cancel");
+        bool isAdmin = msg.sender == factory.owner();
+        bool oracleTimedOut = status == Status.Drawing && block.timestamp >= drawRequestedAt + ORACLE_TIMEOUT;
+        require(isAdmin || oracleTimedOut, "Not allowed");
+        status = Status.Cancelled;
+        emit LotteryCancelled(msg.sender);
+    }
+
+    function refund() external {
+        require(status == Status.Cancelled, "Refund unavailable");
         uint256 amount = ticketCount[msg.sender] * TICKET_PRICE;
         require(amount > 0, "Nothing to refund");
-
         ticketCount[msg.sender] = 0; // empêche un double remboursement
         credits[msg.sender] += amount;
         emit Refunded(msg.sender, amount);
     }
 
-    /// Retire ses crédits (« pull payment »).
-    /// Le solde est remis à zéro AVANT l'envoi (checks-effects-interactions),
-    /// ce qui bloque la réentrance et le double retrait.
+    /// Retrait des crédits (« pull payment ») : le solde est remis à zéro AVANT l'envoi
+    /// (checks-effects-interactions), ce qui bloque la réentrance et le double retrait.
     function withdraw() external {
         uint256 amount = credits[msg.sender];
         require(amount > 0, "Nothing to withdraw");
-
         credits[msg.sender] = 0;
         (bool ok, ) = payable(msg.sender).call{value: amount}("");
         require(ok, "Transfer failed");

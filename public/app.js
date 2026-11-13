@@ -2,49 +2,64 @@
 // BlockLucky — interface web
 // Deux modes :
 //   • démo       : l'API Express tient les comptes (ETH fictif) ;
-//   • blockchain : MetaMask + smart contract BlockLucky (Ganache ou Sepolia).
+//   • blockchain : MetaMask + usine à tirages BlockLucky + oracle de hasard Chainlink VRF.
+// Modules : common.js (outils), account.js (compte), onboarding.js (tuto MetaMask),
+//           admin.js (espace admin), fx.js (effets), tour.js (visite guidée).
 // ---------------------------------------------------------------------------
-import { BrowserProvider, Contract, formatEther, parseEther, keccak256, AbiCoder } from '/vendor/ethers.js';
+import { BrowserProvider, Contract, formatEther, parseEther } from '/vendor/ethers.js';
 import { Tour } from './tour.js';
 import * as fx from './fx.js';
+import {
+  TICKET_PRICE, MAX_PER_PURCHASE, $, $$, fmtEth, fmtPct, pad, short, plural, sameAddress, esc, displayName,
+  store, setHTML, avatar, empty, download, downloadCsv, toast, api,
+} from './common.js';
+import { initAccount } from './account.js';
+import { initOnboarding } from './onboarding.js';
+import { initAdmin } from './admin.js';
 
 // ---------------------------------------------------------------------------
 // Constantes
 // ---------------------------------------------------------------------------
-const TICKET_PRICE = 0.01;
-const MAX_PER_PURCHASE = 20;
-const LOG_CHUNK = 9000;         // les RPC publics refusent de lire plus de 10 000 blocs d'un coup
-const DRAW_WINDOW = 256;        // l'EVM ne garde le hash que des 256 derniers blocs
-const REFRESH_EVERY = 6000;     // ms
+const LOG_CHUNK = 9000;        // les RPC publics refusent de lire plus de 10 000 blocs d'un coup
+const STATUS = ['open', 'drawing', 'settled', 'cancelled']; // ordre de l'enum Status du contrat
 
 const NETWORKS = {
   31337: { name: 'Ganache (local)', short: 'Local · 31337', explorer: null, blockTime: 'instantané sur Ganache' },
   11155111: { name: 'Sepolia', short: 'Sepolia', explorer: 'https://sepolia.etherscan.io', blockTime: 'environ 12 secondes sur Sepolia' },
 };
 
-const VIEWS = { lottery: 'Tableau de bord', tickets: 'Mes tickets', history: 'Résultats', settings: 'Réglages', guide: 'Règles & lexique' };
+const VIEWS = { lottery: 'Tableau de bord', tickets: 'Mes tickets', history: 'Résultats', settings: 'Réglages', guide: 'Règles & lexique', admin: 'Espace admin' };
 
 const PHASES = {
   open: { label: 'Ventes ouvertes', cls: 'status-live', live: true },
   closable: { label: 'Ventes closes', cls: 'status-warn' },
-  scheduled: { label: 'Tirage programmé', cls: 'status-warn' },
-  drawable: { label: 'Tirage prêt', cls: 'status-live', live: true },
+  drawing: { label: 'Oracle en cours', cls: 'status-live', live: true },
+  oracleTimeout: { label: 'Oracle sans réponse', cls: 'status-danger' },
   settled: { label: 'Gagnant désigné', cls: 'status-win' },
-  expired: { label: 'Remboursements ouverts', cls: 'status-danger' },
+  cancelled: { label: 'Tirage annulé', cls: 'status-danger' },
   empty: { label: 'Terminé sans ticket', cls: '' },
+  none: { label: 'Aucun tirage', cls: '' },
 };
 
 /** Messages d'erreur du contrat traduits pour un débutant. */
 const REVERT_MESSAGES = {
   'Sales closed': 'Les ventes de ce tirage sont closes.',
   'Invalid quantity': 'Quantité invalide, ou plus assez de tickets disponibles.',
+  'Player limit reached': 'Tu as atteint la limite de tickets par joueur pour ce tirage.',
   'Wrong payment': 'Le montant envoyé ne correspond pas au prix des tickets.',
-  'Not ready': 'Le tirage ne peut pas encore être programmé : la clôture n’est pas atteinte ou aucun ticket n’a été vendu.',
-  'Draw unavailable': 'Le tirage n’est pas encore disponible : le bloc programmé doit d’abord être créé.',
-  'Refund unavailable': 'Le remboursement n’est possible que si personne n’a lancé le tirage dans les 256 blocs.',
+  'Not ready': 'Le tirage ne peut pas encore être demandé : la clôture n’est pas atteinte ou aucun ticket n’a été vendu.',
+  'Cannot cancel': 'Ce tirage est déjà terminé : il ne peut plus être annulé.',
+  'Not allowed': 'Seul l’administrateur peut annuler, sauf si l’oracle n’a pas répondu depuis plus d’une heure.',
+  'Refund unavailable': 'Le remboursement n’est possible que pour un tirage annulé.',
   'Nothing to refund': 'Tu n’as aucun ticket à te faire rembourser.',
   'Nothing to withdraw': 'Tu n’as aucun gain à retirer.',
   'Transfer failed': 'Le transfert vers ton portefeuille a échoué.',
+  'Current draw still active': 'Un tirage est encore en cours : il doit se terminer avant d’en créer un autre.',
+  'Only owner': 'Seul le propriétaire de l’usine à tirages (l’admin) peut faire ça.',
+  'Invalid player limit': 'La limite par joueur doit être entre 1 et le nombre de tickets.',
+  'Invalid configuration': 'Réglages invalides : durée et nombre de tickets (1 à 10 000) doivent être positifs.',
+  'Nothing sent': 'Indique un montant à envoyer.',
+  'Unknown or already fulfilled request': 'L’oracle a déjà répondu à cette demande.',
 };
 
 const TX_STEPS = [
@@ -53,53 +68,27 @@ const TX_STEPS = [
   ['Confirmé', 'C’est inscrit dans la blockchain, pour toujours.'],
 ];
 
-const CHAIN_ACTIONS = {
-  scheduleDraw: {
-    title: 'Programmer le tirage',
-    text: 'Le contrat choisit un bloc futur : son empreinte, encore inconnue, désignera le gagnant.',
-    send: contract => contract.scheduleDraw({ gasLimit: 120000 }),
-    done: 'Tirage programmé ! Il pourra être lancé dans deux blocs.',
-  },
-  draw: {
-    title: 'Lancer le tirage',
-    text: 'Le contrat lit l’empreinte du bloc programmé et en déduit le ticket gagnant.',
-    send: contract => contract.draw({ gasLimit: 300000 }),
-    done: 'Tirage effectué !',
-  },
-  refund: {
-    title: 'Me faire rembourser',
-    text: 'Personne n’a lancé le tirage à temps : ta mise est créditée dans le contrat.',
-    send: contract => contract.refund({ gasLimit: 120000 }),
-    done: 'Remboursement crédité. Retire-le maintenant vers ton portefeuille.',
-  },
-  withdraw: {
-    title: 'Retirer mes gains',
-    text: 'Le contrat t’envoie les ETH qui t’attendent.',
-    send: contract => contract.withdraw(),
-    done: 'Les ETH sont arrivés dans ton portefeuille !',
-  },
-};
-
 const CYCLE = [
-  ['Ventes', 'Ouvertes 1 h, ou jusqu’à 100 tickets.'],
-  ['Programmation', 'Un joueur programme le tirage sur un bloc futur.'],
-  ['Attente', 'Le bloc choisi doit être créé.'],
-  ['Tirage', 'Son empreinte désigne le ticket gagnant.'],
+  ['Ventes', 'Ouvertes jusqu’à l’échéance, ou jusqu’au dernier ticket.'],
+  ['Demande à l’oracle', 'Le contrat demande un nombre aléatoire à Chainlink.'],
+  ['Réponse de l’oracle', 'Le nombre arrive avec une preuve vérifiée.'],
+  ['Gagnant', 'Le nombre désigne le ticket gagnant.'],
   ['Retrait', 'Le gagnant retire la cagnotte.'],
 ];
 
 const TOUR_STEPS = [
   { view: 'lottery', title: 'Bienvenue sur BlockLucky', text: ['BlockLucky est une loterie de démonstration : tu achètes des tickets, un ticket est tiré au sort, et son propriétaire gagne toute la cagnotte.', 'Aucun argent réel n’est en jeu. Ce tuto dure une minute.'] },
-  { view: 'lottery', target: '#walletCard', title: 'Ton portefeuille', text: ['Voici ton solde. En mode démo, tu reçois 1 ETH fictif pour jouer.', 'L’ETH est la monnaie de la blockchain Ethereum. Ici, il n’a aucune valeur.'] },
-  { view: 'lottery', target: '#potCard', title: 'La cagnotte', text: ['Chaque ticket acheté ajoute 0,01 ETH à la cagnotte, et le gagnant remporte 100 %.', 'Le tirage a lieu au bout d’une heure, ou dès que les 100 tickets sont vendus.'] },
-  { view: 'lottery', target: '#quantityZone', title: 'Choisis tes tickets', text: ['Utilise + et −, ou un raccourci. Tu peux prendre de 1 à 20 tickets par achat.'] },
+  { view: 'lottery', target: '#walletCard', title: 'Ton portefeuille', text: ['Voici ton solde. En mode démo, il est vide tant que tu n’as pas de compte : à l’inscription, tu reçois 1 ETH fictif pour jouer.', 'L’ETH est la monnaie de la blockchain Ethereum. Ici, il n’a aucune valeur.'] },
+  { view: 'lottery', target: '#potCard', title: 'La cagnotte', text: ['Chaque ticket acheté ajoute 0,01 ETH à la cagnotte, et le gagnant remporte 100 %.', 'Le tirage a lieu à l’échéance, ou dès que tous les tickets sont vendus.'] },
+  { view: 'lottery', target: '#quantityZone', title: 'Choisis tes tickets', text: ['Utilise + et −, ou un raccourci. Tu peux prendre de 1 à 20 tickets par achat.', 'Une limite par joueur garantit que personne ne rafle tous les tickets.'] },
   { view: 'lottery', target: '#estimate', title: 'Tes chances', text: ['Ta part = tes tickets ÷ tous les tickets du tirage. Plus tu en as, plus tes chances montent.'] },
   { view: 'lottery', target: '#buy', title: 'Acheter', text: ['Un récapitulatif s’affiche avant de confirmer : rien n’est débité sans ton accord.'] },
-  { view: 'lottery', target: '#activityCard', title: 'En direct', text: ['Les achats de tous les joueurs apparaissent ici. Les adresses sont des identifiants anonymes.'] },
+  { view: 'lottery', target: '#activityCard', title: 'En direct', text: ['Les achats de tous les joueurs apparaissent ici instantanément, sans recharger la page.'] },
   { view: 'lottery', target: ['.side-nav [data-view="tickets"]', '.mobile-nav [data-view="tickets"]'], title: 'Mes tickets', text: ['Retrouve tes numéros de tickets, tes tirages passés et tes reçus.'] },
   { view: 'lottery', target: ['.side-nav [data-view="history"]', '.mobile-nav [data-view="history"]'], title: 'Résultats', text: ['L’historique de tous les tirages et de leurs gagnants.'] },
+  { view: 'lottery', target: '#accountButton', title: 'Ton compte', text: ['Crée un compte gratuit pour jouer en démo : tu reçois 1 ETH fictif.', 'Ton solde et tes tickets te suivent ensuite sur n’importe quel appareil.'] },
   { view: 'lottery', target: '#notificationButton', title: 'Notifications', text: ['Tu es prévenu ici quand un tirage auquel tu participes se termine.'] },
-  { view: 'settings', target: '#modeOptions', title: 'Le mode blockchain', text: ['Envie d’aller plus loin ? Passe en mode « Blockchain » avec MetaMask.', 'Les règles sont alors appliquées par un smart contract : un programme public que personne ne peut modifier, pas même l’organisateur.'] },
+  { view: 'settings', target: '#modeOptions', title: 'Le mode blockchain', text: ['Envie d’aller plus loin ? Passe en mode « Blockchain » avec MetaMask : un tuto te guide pas à pas.', 'Les règles sont alors appliquées par un smart contract, et le hasard vient d’un oracle vérifiable.'] },
   { view: 'lottery', target: '#themeToggle', title: 'À toi de jouer !', text: ['Ce bouton change le thème clair ou sombre.', 'Tu peux relancer ce tuto à tout moment depuis « Revoir le tuto » ou les Réglages.'] },
 ];
 
@@ -109,63 +98,35 @@ const TOUR_STEPS = [
 const app = {
   mode: 'demo',
   state: null,          // données affichées (même forme dans les deux modes)
-  config: null,         // contrat déployé (public/contract.json) ou null
+  session: null,        // compte, portefeuille vérifié, annonces, robinet
+  config: null,         // contrats déployés (public/contract.json) ou null
   quantity: 1,
   busy: false,
   view: 'lottery',
   pending: null,        // achat en attente de confirmation
   refreshing: null,
   refreshAgain: false,
+  live: false,          // flux temps réel connecté
   seenDraw: undefined,  // dernier tirage connu, pour déclencher l'animation une seule fois
   seenActivity: null,
   zeroRefreshed: null,
   chain: {
-    provider: null, contract: null, account: null,
-    info: null,              // phase du tirage, blocs, crédits…
-    timeOffset: 0,           // décalage entre l'horloge de la blockchain et celle du navigateur
-    events: [], scannedTo: null, blocks: new Map(), wrongNetwork: false,
+    provider: null, signer: null, factory: null, account: null,
+    info: null, rounds: [], timeOffset: 0, wrongNetwork: false,
+    lotteries: new Map(), events: [], factoryScannedTo: null, blocks: new Map(), oracleTimeout: null,
   },
 };
 
-// ---------------------------------------------------------------------------
-// Utilitaires
-// ---------------------------------------------------------------------------
-const $ = id => document.getElementById(id);
-const $$ = selector => [...document.querySelectorAll(selector)];
-const fmtEth = n => Number(n).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtPct = n => n.toLocaleString('fr-FR', { maximumFractionDigits: 1 }) + ' %';
-const pad = n => String(n).padStart(3, '0');
-const short = address => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : '—';
-const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
-const sameAddress = (a, b) => Boolean(a && b) && a.toLowerCase() === b.toLowerCase();
-const esc = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const network = () => NETWORKS[app.config?.chainId] || { name: `Réseau ${app.config?.chainId}`, short: `Réseau ${app.config?.chainId}`, explorer: null, blockTime: 'quelques secondes' };
+// Sans contrat déployé, on parle du « réseau de test » plutôt que d'afficher un identifiant vide.
+const network = () => NETWORKS[app.config?.chainId] || (app.config
+  ? { name: `Réseau ${app.config.chainId}`, short: `Réseau ${app.config.chainId}`, explorer: null, blockTime: 'quelques secondes' }
+  : { name: 'de test', short: 'Blockchain', explorer: null, blockTime: 'quelques secondes' });
+const isLocalChain = () => app.config?.chainId === 31337;
 const now = () => Date.now() + (app.mode === 'chain' ? app.chain.timeOffset : 0);
 const networkLabel = () => (app.mode === 'demo' ? 'Démonstration' : network().short);
 const explorerUrl = (kind, value) => network().explorer && app.mode === 'chain' ? `${network().explorer}/${kind}/${value}` : null;
-
-const store = {
-  get(key) { try { return localStorage.getItem('blocklucky.' + key); } catch { return null; } },
-  set(key, value) {
-    try {
-      if (value === null || value === undefined) localStorage.removeItem('blocklucky.' + key);
-      else localStorage.setItem('blocklucky.' + key, value);
-      return true;
-    } catch { return false; }
-  },
-};
-
-/** Ne réécrit le HTML que s'il a changé (évite de rejouer les animations toutes les 6 s). */
-function setHTML(el, html) {
-  if (el._html === html) return;
-  el._html = html;
-  el.innerHTML = html;
-}
-
-function avatar(address, extraClass = '') {
-  const hue = parseInt(address.slice(2, 6), 16) % 360;
-  return `<span class="avatar ${extraClass}" style="--h:${hue}">${esc(address.slice(2, 4).toUpperCase())}</span>`;
-}
+const currentPhase = () => PHASES[app.mode === 'chain' ? app.chain.info?.phase || 'none' : 'open'];
+const canAdmin = () => Boolean(app.session?.isAdmin || (app.mode === 'chain' && app.chain.info?.isOwner));
 
 function timeAgo(date) {
   const seconds = Math.max(0, (now() - date) / 1000);
@@ -175,35 +136,9 @@ function timeAgo(date) {
   return new Date(date).toLocaleDateString('fr-FR');
 }
 
-const empty = (icon, text, extra = '') =>
-  `<div class="empty"><span class="empty-icon"><svg class="icon"><use href="#${icon}"/></svg></span><p>${text}</p>${extra}</div>`;
-
-function download(filename, content, type) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const link = Object.assign(document.createElement('a'), { href: url, download: filename });
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function downloadCsv(filename, rows) {
-  const csv = '﻿' + rows.map(row => row.map(value => '"' + String(value).replaceAll('"', '""') + '"').join(';')).join('\r\n');
-  download(filename, csv, 'text/csv;charset=utf-8');
-}
-
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
-let toastTimer;
-function toast(message, kind = 'info') {
-  const el = $('toast');
-  el.textContent = message;
-  el.dataset.kind = kind;
-  el.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), kind === 'error' ? 7000 : 4500);
-}
 
 /** Erreur de fond (actualisation automatique) : une bannière plutôt qu'une pluie de toasts. */
 function setConnectionError(message) {
@@ -223,7 +158,7 @@ function errorMessage(error) {
   if (/insufficient funds/i.test(text)) return 'Solde insuffisant pour payer les tickets et les frais de transaction.';
   if (code === 'CALL_EXCEPTION') return 'Le contrat a refusé l’opération : ses conditions ne sont pas remplies pour l’instant.';
   if (code === 'NETWORK_ERROR' || code === 'SERVER_ERROR' || code === 'TIMEOUT' || /Failed to fetch|NetworkError/i.test(text)) {
-    return app.config?.chainId === 31337 && app.mode === 'chain'
+    return isLocalChain() && app.mode === 'chain'
       ? 'Ganache ne répond pas : vérifie que « npm run chain » tourne.'
       : 'Connexion au réseau impossible. Vérifie ta connexion internet.';
   }
@@ -264,7 +199,7 @@ const hashView = () => {
 };
 
 function show(view, { push = true } = {}) {
-  if (!VIEWS[view]) view = 'lottery';
+  if (!VIEWS[view] || (view === 'admin' && !canAdmin())) view = 'lottery';
   const changed = view !== app.view;
   app.view = view;
   $$('.view').forEach(el => { el.hidden = el.id !== `view-${view}`; });
@@ -277,6 +212,7 @@ function show(view, { push = true } = {}) {
   document.title = `BlockLucky — ${VIEWS[view]}`;
   if (push && location.hash !== '#' + view) history.pushState(null, '', '#' + view);
   if (changed) window.scrollTo({ top: 0, behavior: 'instant' });
+  if (view === 'admin') admin?.load(true);
 }
 
 document.addEventListener('click', event => {
@@ -290,12 +226,14 @@ window.addEventListener('popstate', () => show(hashView(), { push: false }));
 // ---------------------------------------------------------------------------
 // Quantité de tickets
 // ---------------------------------------------------------------------------
+const playerLimitLeft = () => Math.max(0, (app.state?.rules?.maxPerPlayer ?? MAX_PER_PURCHASE) - (app.state?.myTickets ?? 0));
+
 function affordableTickets() {
   const s = app.state;
   if (!s) return MAX_PER_PURCHASE;
   const remaining = Math.max(0, s.capacity - s.totalTickets);
   const byBalance = Math.floor((s.balance + 1e-9) / TICKET_PRICE);
-  return Math.min(MAX_PER_PURCHASE, remaining, byBalance);
+  return Math.min(MAX_PER_PURCHASE, remaining, byBalance, playerLimitLeft());
 }
 
 function setQuantity(value, { animate = true } = {}) {
@@ -323,24 +261,11 @@ $('saveQuantity').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Chargement des données
 // ---------------------------------------------------------------------------
-async function api(url, body) {
-  let response;
-  try {
-    response = await fetch(url, body
-      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-      : { cache: 'no-store' });
-  } catch {
-    throw new Error('Le serveur BlockLucky ne répond pas. Vérifie que « npm run dev » tourne.');
-  }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Le serveur est indisponible.');
-  return data;
-}
-
 async function loadConfig() {
   try {
     const response = await fetch('/contract.json', { cache: 'no-store' });
-    return response.ok ? await response.json() : null;
+    const config = response.ok ? await response.json() : null;
+    return config?.factory ? config : null; // un ancien déploiement (sans usine) est ignoré
   } catch {
     return null;
   }
@@ -359,15 +284,16 @@ function refresh(options) {
 async function doRefresh({ silent = true } = {}) {
   const mode = app.mode;
   try {
-    let next;
-    if (mode === 'demo') next = { ...(await api('/api/state')), closed: false };
-    else if (app.chain.contract) next = await readChain();
-    else return;
+    const [session, next] = await Promise.all([
+      api('/api/session'),
+      mode === 'demo' ? api('/api/state').then(data => ({ ...data, closed: false })) : app.chain.factory ? readChain() : null,
+    ]);
     if (app.mode !== mode) return; // le mode a changé pendant le chargement
-    app.state = next;
+    app.session = session;
+    if (next) app.state = next;
     setConnectionError(null);
     render();
-    detectDraw();
+    if (next) detectDraw();
   } catch (error) {
     if (app.mode !== mode) return;
     const message = errorMessage(error);
@@ -377,10 +303,49 @@ async function doRefresh({ silent = true } = {}) {
   }
 }
 
+let refreshTimer;
+/** Regroupe les événements temps réel rapprochés en une seule actualisation. */
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => refresh(), 250);
+}
+
+// ---------------------------------------------------------------------------
+// Temps réel (Server-Sent Events)
+// ---------------------------------------------------------------------------
+function setLive(live) {
+  app.live = live;
+  const status = $('liveStatus');
+  status.className = live ? 'status status-live' : 'status';
+  status.innerHTML = live ? '<i></i>En direct' : 'Reconnexion…';
+  status.title = live ? 'Les nouveautés arrivent instantanément.' : 'Connexion temps réel perdue : actualisation toutes les 6 secondes.';
+}
+
+function connectStream() {
+  if (!window.EventSource) return;
+  const source = new EventSource('/api/stream');
+  source.addEventListener('hello', () => { setLive(true); scheduleRefresh(); });
+  source.addEventListener('error', () => setLive(false)); // le navigateur se reconnecte tout seul
+  source.addEventListener('update', () => { if (app.mode === 'demo') scheduleRefresh(); });
+  source.addEventListener('chain', () => { if (app.mode === 'chain') scheduleRefresh(); });
+  source.addEventListener('announcement', () => scheduleRefresh());
+}
+
 // ---------------------------------------------------------------------------
 // Blockchain (MetaMask)
 // ---------------------------------------------------------------------------
+/**
+ * Adresse de Ganache pour MetaMask. Sur l'ordinateur : 127.0.0.1. Depuis un téléphone (site ouvert via
+ * l'adresse réseau du PC), 127.0.0.1 désignerait le téléphone : on prend l'adresse du PC (npm run chain:lan).
+ */
+function localRpcUrl() {
+  const host = location.hostname;
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host) ? 'http://127.0.0.1:8545' : `http://${host}:8545`;
+}
+
 async function ensureNetwork() {
+  if (!window.ethereum) throw new Error('MetaMask n’est pas installé dans ce navigateur.');
+  if (!app.config) throw new Error('Aucun contrat n’est déployé : lance « npm run deploy », puis recharge la page.');
   const wanted = app.config.chainId;
   const current = Number(await window.ethereum.request({ method: 'eth_chainId' }));
   if (current === wanted) return;
@@ -391,7 +356,7 @@ async function ensureNetwork() {
     if (error.code === 4902 && wanted === 31337) {
       await window.ethereum.request({
         method: 'wallet_addEthereumChain',
-        params: [{ chainId, chainName: 'Ganache local (BlockLucky)', rpcUrls: ['http://127.0.0.1:8545'], nativeCurrency: { name: 'Ether de test', symbol: 'ETH', decimals: 18 } }],
+        params: [{ chainId, chainName: 'Ganache local (BlockLucky)', rpcUrls: [localRpcUrl()], nativeCurrency: { name: 'Ether de test', symbol: 'ETH', decimals: 18 } }],
       });
     } else if (error.code === 4902) {
       throw new Error(`Le réseau ${network().name} n’est pas activé dans MetaMask. Active « Afficher les réseaux de test », puis réessaie.`);
@@ -404,23 +369,25 @@ async function ensureNetwork() {
 async function attachAccount(address) {
   const c = app.chain;
   c.provider = new BrowserProvider(window.ethereum, 'any'); // 'any' : supporte les changements de réseau
-  const signer = await c.provider.getSigner(address);
-  c.account = await signer.getAddress();
-  c.contract = new Contract(app.config.address, app.config.abi, signer);
+  c.signer = await c.provider.getSigner(address);
+  c.account = await c.signer.getAddress();
+  c.factory = new Contract(app.config.factory, app.config.abi.factory, c.signer);
 }
 
 async function connect({ silent = false } = {}) {
-  if (!window.ethereum) throw new Error('MetaMask n’est pas installé dans ce navigateur. Installe l’extension depuis metamask.io, ou reste en mode démo.');
+  if (!window.ethereum) throw Object.assign(new Error('MetaMask n’est pas installé dans ce navigateur.'), { needsOnboarding: true });
   if (!app.config) throw new Error('Aucun contrat n’est déployé. Lance « npm run deploy » (Ganache) ou « npm run deploy:sepolia », puis recharge la page.');
   const accounts = await window.ethereum.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' });
-  if (!accounts?.length) throw new Error('Aucun compte MetaMask n’est autorisé pour ce site.');
+  if (!accounts?.length) throw Object.assign(new Error('Aucun compte MetaMask n’est autorisé pour ce site.'), { needsOnboarding: true });
   if (!silent) await ensureNetwork();
   await attachAccount(accounts[0]);
 }
 
 function disconnectChain() {
-  Object.assign(app.chain, { provider: null, contract: null, account: null, info: null, wrongNetwork: false });
+  Object.assign(app.chain, { provider: null, signer: null, factory: null, account: null, info: null, wrongNetwork: false });
 }
+
+const lotteryContract = address => new Contract(address, app.config.abi.lottery, app.chain.signer);
 
 async function getBlock(number) {
   const c = app.chain;
@@ -428,34 +395,93 @@ async function getBlock(number) {
   return c.blocks.get(number);
 }
 
-/** Lit les nouveaux événements du contrat, par tranches de 9 000 blocs (limite des RPC publics). */
-async function syncEvents(latest) {
-  const c = app.chain;
-  const iface = c.contract.interface;
-  let from = c.scannedTo + 1;
-  while (from <= latest) {
-    const to = Math.min(latest, from + LOG_CHUNK - 1);
-    const logs = await c.provider.getLogs({ address: app.config.address, fromBlock: from, toBlock: to });
-    for (const log of logs) {
-      let parsed = null;
-      try { parsed = iface.parseLog(log); } catch { /* événement inconnu */ }
-      if (parsed) c.events.push({ name: parsed.name, args: parsed.args, blockNumber: log.blockNumber, hash: log.transactionHash });
-    }
-    c.scannedTo = to;
-    from = to + 1;
+/** Lit les journaux d'événements par tranches de 9 000 blocs (limite des RPC publics). */
+async function scanLogs(addresses, from, to, onLog) {
+  for (let start = from; start <= to; start += LOG_CHUNK) {
+    const end = Math.min(to, start + LOG_CHUNK - 1);
+    const logs = await app.chain.provider.getLogs({ address: addresses.length === 1 ? addresses[0] : addresses, fromBlock: start, toBlock: end });
+    logs.forEach(onLog);
   }
 }
 
-/** Recalcule le ticket gagnant à partir du hash du bloc : le tirage est vérifiable par tous. */
-async function verifyDraw(drawBlock, total) {
-  try {
-    const block = await getBlock(drawBlock);
-    const encoded = AbiCoder.defaultAbiCoder().encode(['bytes32', 'address'], [block.hash, app.config.address]);
-    const index = BigInt(keccak256(encoded)) % BigInt(total);
-    return { hash: block.hash, drawBlock, index: Number(index), winningTicket: Number(index) + 1 };
-  } catch {
-    return null;
+/** Découvre les tirages (événements de l'usine), puis lit les nouveaux événements de chaque tirage. */
+async function syncEvents(latest) {
+  const c = app.chain;
+  const factoryIface = c.factory.interface;
+  const lotteryIface = new Contract(app.config.factory, app.config.abi.lottery).interface;
+  if (c.factoryScannedTo === null) c.factoryScannedTo = (app.config.deployBlock ?? Math.max(0, latest - LOG_CHUNK)) - 1;
+
+  await scanLogs([app.config.factory], c.factoryScannedTo + 1, latest, log => {
+    let parsed = null;
+    try { parsed = factoryIface.parseLog(log); } catch { /* événement inconnu */ }
+    if (parsed?.name !== 'LotteryCreated') return;
+    const key = parsed.args.lottery.toLowerCase();
+    if (!c.lotteries.has(key)) {
+      c.lotteries.set(key, {
+        address: parsed.args.lottery, round: Number(parsed.args.round), deadline: Number(parsed.args.deadline) * 1000,
+        capacity: Number(parsed.args.capacity), maxPerPlayer: Number(parsed.args.maxTicketsPerPlayer), scannedTo: log.blockNumber - 1,
+      });
+    }
+  });
+  c.factoryScannedTo = Math.max(c.factoryScannedTo, latest); // jamais en arrière : pas d'événement compté deux fois
+
+  // Les tirages déjà à jour sont lus ensemble, en une seule requête.
+  const groups = new Map();
+  for (const lottery of c.lotteries.values()) {
+    if (lottery.scannedTo >= latest) continue;
+    if (!groups.has(lottery.scannedTo)) groups.set(lottery.scannedTo, []);
+    groups.get(lottery.scannedTo).push(lottery);
   }
+  for (const [scannedTo, lotteries] of groups) {
+    await scanLogs(lotteries.map(l => l.address), scannedTo + 1, latest, log => {
+      let parsed = null;
+      try { parsed = lotteryIface.parseLog(log); } catch { /* événement inconnu */ }
+      if (parsed) c.events.push({ lottery: log.address.toLowerCase(), name: parsed.name, args: parsed.args, blockNumber: log.blockNumber, hash: log.transactionHash });
+    });
+    lotteries.forEach(l => { l.scannedTo = Math.max(l.scannedTo, latest); });
+  }
+}
+
+/** Reconstitue chaque tirage (achats, résultat, annulation…) à partir des événements. */
+function buildRounds(account) {
+  const c = app.chain;
+  const dateOf = blockNumber => c.blocks.get(blockNumber).timestamp * 1000;
+  const rounds = [...c.lotteries.values()].sort((a, b) => a.round - b.round).map(l => ({
+    ...l, purchases: [], win: null, cancelled: null, request: null, myRefunds: 0, myWithdrawals: 0, myRefundEvents: [], myWithdrawEvents: [],
+  }));
+  const byAddress = new Map(rounds.map(r => [r.address.toLowerCase(), r]));
+  for (const e of c.events) {
+    const r = byAddress.get(e.lottery);
+    if (!r) continue;
+    const mine = e.args.player && sameAddress(e.args.player, account);
+    if (e.name === 'TicketPurchased') {
+      const quantity = Number(e.args.quantity);
+      const first = Number(e.args.firstTicket);
+      r.purchases.push({ address: e.args.player, quantity, numbers: Array.from({ length: quantity }, (_, i) => first + i), date: dateOf(e.blockNumber), key: e.hash });
+    } else if (e.name === 'DrawRequested') {
+      r.request = { requestId: e.args.requestId.toString(), date: dateOf(e.blockNumber), hash: e.hash };
+    } else if (e.name === 'WinnerSelected') {
+      r.win = { winner: e.args.player, prize: Number(formatEther(e.args.prize)), winningTicket: Number(e.args.winningTicket), randomWord: e.args.randomWord.toString(), date: dateOf(e.blockNumber), hash: e.hash };
+    } else if (e.name === 'LotteryCancelled') {
+      r.cancelled = { by: e.args.by, date: dateOf(e.blockNumber), hash: e.hash };
+    } else if (e.name === 'Refunded' && mine) {
+      r.myRefunds += Number(formatEther(e.args.amount));
+      r.myRefundEvents.push({ amount: Number(formatEther(e.args.amount)), date: dateOf(e.blockNumber), hash: e.hash });
+    } else if (e.name === 'Withdrawn' && mine) {
+      r.myWithdrawals += Number(formatEther(e.args.amount));
+      r.myWithdrawEvents.push({ amount: Number(formatEther(e.args.amount)), date: dateOf(e.blockNumber), hash: e.hash });
+    }
+  }
+  for (const r of rounds) {
+    r.mine = r.purchases.filter(p => sameAddress(p.address, account));
+    r.myNumbers = r.mine.flatMap(p => p.numbers);
+    r.myStake = r.myNumbers.length * TICKET_PRICE;
+    r.iWon = Boolean(r.win && sameAddress(r.win.winner, account));
+    // Crédits restant à retirer dans ce tirage : gain + remboursement − retraits.
+    r.credits = Math.max(0, Math.round(((r.iWon ? r.win.prize : 0) + r.myRefunds - r.myWithdrawals) * 1e6) / 1e6);
+    r.refundable = Boolean(r.cancelled && r.myStake - r.myRefunds > 1e-9);
+  }
+  return rounds;
 }
 
 async function readChain() {
@@ -467,97 +493,95 @@ async function readChain() {
   const latest = await c.provider.getBlock('latest');
   // Sur Ganache, le temps peut être avancé (evm_increaseTime) : on suit l'horloge de la blockchain.
   c.timeOffset = Math.max(0, latest.timestamp * 1000 - Date.now());
-  if (c.scannedTo === null) c.scannedTo = (app.config.deployBlock ?? Math.max(0, latest.number - LOG_CHUNK)) - 1;
-
-  const k = c.contract;
-  const [total, deadline, capacity, drawBlock, settled, winner, credits, ticketCount, balance] = await Promise.all([
-    k.totalTickets(), k.deadline(), k.maxTickets(), k.drawBlock(), k.settled(), k.winner(),
-    k.credits(c.account), k.ticketCount(c.account), c.provider.getBalance(c.account),
-  ]);
-  await syncEvents(latest.number);
+  const [owner, balance] = await Promise.all([c.factory.owner(), c.provider.getBalance(c.account)]);
+  // Un bloc de retard sur un réseau public : le serveur RPC qui lit les événements n'a pas toujours le tout dernier bloc.
+  await syncEvents(isLocalChain() ? latest.number : latest.number - 1);
   await Promise.all([...new Set(c.events.map(e => e.blockNumber))].map(getBlock));
-  const dateOf = blockNumber => c.blocks.get(blockNumber).timestamp * 1000;
 
-  // Rejoue les événements dans l'ordre pour retrouver les numéros de tickets.
-  let counter = 0;
-  const purchases = [];
-  const myNumbers = [];
-  const mine = [];
-  const players = new Set();
-  const refunds = [];
-  const withdrawals = [];
-  let winEvent = null;
-  for (const e of c.events) {
-    if (e.name === 'TicketPurchased') {
-      const quantity = Number(e.args.quantity);
-      const numbers = Array.from({ length: quantity }, (_, i) => counter + i + 1);
-      counter += quantity;
-      players.add(e.args.player.toLowerCase());
-      const entry = { address: e.args.player, quantity, numbers, date: dateOf(e.blockNumber), key: e.hash };
-      purchases.push(entry);
-      if (sameAddress(e.args.player, c.account)) { mine.push(entry); myNumbers.push(...numbers); }
-    } else if (e.name === 'WinnerSelected') winEvent = e;
-    else if (e.name === 'Refunded' && sameAddress(e.args.player, c.account)) refunds.push(e);
-    else if (e.name === 'Withdrawn' && sameAddress(e.args.player, c.account)) withdrawals.push(e);
+  const rounds = buildRounds(c.account);
+  c.rounds = rounds;
+  const current = rounds.at(-1) || null;
+
+  // État en direct du tirage courant.
+  let live = null;
+  if (current) {
+    const k = lotteryContract(current.address);
+    if (c.oracleTimeout === null) c.oracleTimeout = Number(await k.ORACLE_TIMEOUT()) * 1000;
+    const [status, total, requestedAt] = await Promise.all([k.status(), k.totalTickets(), k.drawRequestedAt()]);
+    live = { status: STATUS[Number(status)], total: Number(total), requestedAt: Number(requestedAt) * 1000 };
   }
 
-  // Phase du tirage, calculée pour le prochain bloc (celui qui contiendra la transaction).
-  const db = Number(drawBlock);
-  const nextBlock = latest.number + 1;
-  let phase = 'open';
-  if (settled) phase = 'settled';
-  else if (db > 0 && nextBlock > db + DRAW_WINDOW) phase = 'expired';
-  else if (db > 0 && nextBlock > db) phase = 'drawable';
-  else if (db > 0) phase = 'scheduled';
-  else if (now() >= Number(deadline) * 1000 || Number(total) >= Number(capacity)) phase = Number(total) > 0 ? 'closable' : 'empty';
+  let phase = 'none';
+  if (live) {
+    if (live.status === 'open') {
+      if (now() >= current.deadline || live.total >= current.capacity) phase = live.total > 0 ? 'closable' : 'empty';
+      else phase = 'open';
+    } else if (live.status === 'drawing') {
+      phase = now() >= live.requestedAt + c.oracleTimeout ? 'oracleTimeout' : 'drawing';
+    } else phase = live.status;
+  }
 
-  const verification = settled && Number(total) > 0 ? await verifyDraw(db, total) : null;
-  const history = winEvent ? [{
-    round: 1, winner: winEvent.args.player, prize: Number(formatEther(winEvent.args.prize)), tickets: Number(total),
-    date: dateOf(winEvent.blockNumber), winningTicket: verification?.winningTicket, verification,
-  }] : [];
+  const history = rounds.filter(r => r.win || r.cancelled).reverse().map(r => ({
+    round: r.round, address: r.address, cancelled: Boolean(r.cancelled), tickets: r.purchases.reduce((n, p) => n + p.quantity, 0),
+    winner: r.win?.winner ?? null, prize: r.win?.prize ?? 0, winningTicket: r.win?.winningTicket, randomWord: r.win?.randomWord,
+    requestId: r.request?.requestId, date: (r.win || r.cancelled).date, hash: (r.win || r.cancelled).hash,
+  }));
 
-  const iWon = winEvent && sameAddress(winEvent.args.player, c.account);
-  const transactions = [
-    ...mine.map(p => ({ id: p.key, type: 'purchase', round: 1, quantity: p.quantity, amount: -p.quantity * TICKET_PRICE, date: p.date, ticketNumbers: p.numbers })),
-    ...(iWon ? [{ id: winEvent.hash, type: 'win', round: 1, quantity: 0, amount: history[0].prize, date: history[0].date }] : []),
-    ...refunds.map(e => ({ id: e.hash, type: 'refund', round: 1, quantity: 0, amount: Number(formatEther(e.args.amount)), date: dateOf(e.blockNumber) })),
-    ...withdrawals.map(e => ({ id: e.hash, type: 'withdraw', round: 1, quantity: 0, amount: Number(formatEther(e.args.amount)), date: dateOf(e.blockNumber) })),
-  ].sort((a, b) => b.date - a.date);
+  const participations = rounds.filter(r => r.myNumbers.length).reverse().map(r => ({
+    round: r.round, quantity: r.myNumbers.length, ticketNumbers: r.myNumbers, date: r.mine[0].date,
+    status: r.win ? (r.iWon ? 'won' : 'lost') : r.cancelled ? 'cancelled' : 'pending',
+    winner: r.win?.winner, winningTicket: r.win?.winningTicket, prize: r.win?.prize ?? 0,
+  }));
 
-  const status = settled ? (iWon ? 'won' : 'lost') : 'pending';
-  const participations = myNumbers.length ? [{
-    round: 1, quantity: myNumbers.length, ticketNumbers: myNumbers, status, date: mine[0].date,
-    ...(history[0] ? { winner: history[0].winner, winningTicket: history[0].winningTicket, prize: history[0].prize, totalTickets: Number(total) } : {}),
-  }] : [];
+  const transactions = rounds.flatMap(r => [
+    ...r.mine.map(p => ({ id: p.key, type: 'purchase', round: r.round, quantity: p.quantity, amount: -p.quantity * TICKET_PRICE, date: p.date, ticketNumbers: p.numbers })),
+    ...(r.iWon ? [{ id: r.win.hash, type: 'win', round: r.round, quantity: 0, amount: r.win.prize, date: r.win.date }] : []),
+    ...r.myRefundEvents.map(e => ({ id: e.hash, type: 'refund', round: r.round, quantity: 0, amount: e.amount, date: e.date })),
+    ...r.myWithdrawEvents.map(e => ({ id: e.hash, type: 'withdraw', round: r.round, quantity: 0, amount: e.amount, date: e.date })),
+  ]).sort((a, b) => b.date - a.date);
 
-  const readIds = new Set(JSON.parse(store.get('read.' + app.config.address) || '[]'));
-  const notificationId = `chain-${app.config.address}-${c.account}`;
-  const notifications = settled && participations.length ? [{
-    id: notificationId, round: 1, type: status, prize: history[0]?.prize ?? 0, winningTicket: history[0]?.winningTicket,
-    date: history[0]?.date ?? Date.now(), read: readIds.has(notificationId),
-  }] : [];
+  const readIds = new Set(JSON.parse(store.get('read.' + app.config.factory) || '[]'));
+  const notifications = participations.filter(p => p.status !== 'pending').map(p => {
+    const id = `chain-${app.config.factory}-${c.account}-${p.round}`;
+    return { id, round: p.round, type: p.status, prize: p.status === 'cancelled' ? p.quantity * TICKET_PRICE : p.prize, winningTicket: p.winningTicket, date: history.find(h => h.round === p.round)?.date ?? p.date, read: readIds.has(id) };
+  });
 
-  c.info = { phase, drawBlock: db, blockNumber: latest.number, winner, credits: Number(formatEther(credits)), ticketCount: Number(ticketCount) };
+  c.info = {
+    phase, owner, isOwner: sameAddress(owner, c.account), blockNumber: latest.number,
+    lottery: current?.address ?? null, round: current?.round ?? null,
+    requestId: current?.request?.requestId ?? null, requestedAt: live?.requestedAt ?? 0,
+    credits: rounds.reduce((n, r) => n + r.credits, 0),
+    creditTargets: rounds.filter(r => r.credits > 0).map(r => ({ address: r.address, round: r.round, amount: r.credits })),
+    refundTargets: rounds.filter(r => r.refundable).map(r => ({ address: r.address, round: r.round, amount: r.myStake - r.myRefunds })),
+  };
 
+  const total = live?.total ?? 0;
   return {
-    round: 1,
-    endsAt: Number(deadline) * 1000,
-    capacity: Number(capacity),
-    totalTickets: Number(total),
-    participants: players.size,
-    pot: Number(total) * TICKET_PRICE,
-    myTickets: myNumbers.length,
-    myTicketNumbers: myNumbers,
+    round: current?.round ?? 1,
+    endsAt: current?.deadline ?? Date.now(),
+    capacity: current?.capacity ?? 0,
+    rules: { capacity: current?.capacity ?? 0, maxPerPlayer: current?.maxPerPlayer ?? 0 },
+    totalTickets: total,
+    participants: new Set((current?.purchases || []).map(p => p.address.toLowerCase())).size,
+    pot: total * TICKET_PRICE,
+    myTickets: current?.myNumbers.length ?? 0,
+    myTicketNumbers: current?.myNumbers ?? [],
     balance: Number(formatEther(balance)),
     address: c.account,
-    activity: purchases.slice(-12).reverse(),
+    pseudo: app.session?.account?.pseudo ?? null,
+    activity: (current?.purchases || []).slice(-12).reverse(),
     history,
     transactions,
     participations,
     notifications,
     closed: phase !== 'open',
   };
+}
+
+/** Réserve de l'oracle (affichée dans l'espace admin). */
+async function readOracle() {
+  const [link, native] = await app.chain.factory.oracleBalance();
+  return { link: Number(formatEther(link)), native: Number(formatEther(native)) };
 }
 
 async function setMode(next, { announce = false } = {}) {
@@ -568,6 +592,7 @@ async function setMode(next, { announce = false } = {}) {
       await connect();
     } catch (error) {
       toast(errorMessage(error), 'error');
+      if (error.needsOnboarding) onboarding.open(); // MetaMask absent ou non autorisé : on guide pas à pas
       return false;
     } finally {
       $$('.mode-option').forEach(b => b.classList.remove('loading'));
@@ -633,22 +658,18 @@ if (window.ethereum?.on) {
 // ---------------------------------------------------------------------------
 // Rendu
 // ---------------------------------------------------------------------------
-function currentPhase() {
-  return PHASES[app.mode === 'chain' ? app.chain.info?.phase || 'open' : 'open'];
-}
-
-function getParticipations() {
-  return app.state?.participations || [];
-}
+const getParticipations = () => app.state?.participations || [];
 
 function render() {
   renderShell();
   renderSettings();
+  account?.render();
   if (!app.state) {
     $('buy').disabled = true;
     $('buy').textContent = app.mode === 'chain' ? 'Connexion au contrat…' : 'Chargement…';
     return;
   }
+  renderAnnouncement();
   renderWallet();
   renderPot();
   renderPurchase();
@@ -660,9 +681,10 @@ function render() {
   renderTransactions();
   renderHistory();
   renderNotifications();
+  admin?.render();
 }
 
-/** Éléments qui ne dépendent que du mode et du réseau. */
+/** Éléments qui ne dépendent que du mode, du réseau et de la session. */
 function renderShell() {
   const chain = app.mode === 'chain';
   $('networkPillText').textContent = chain ? network().short : 'Mode démo';
@@ -673,13 +695,79 @@ function renderShell() {
     if (badge.textContent !== String(count)) { badge.textContent = count; fx.pulse(badge); }
     badge.classList.toggle('has', count > 0);
   });
+  $$('[data-admin-only]').forEach(el => { el.hidden = !canAdmin(); });
+  // Tuto MetaMask terminé pour cette adresse : plus besoin de ses boutons.
+  const onboarded = onboarding.isComplete();
+  $$('[data-open-onboarding]').forEach(b => {
+    b.hidden = onboarded;
+    const parent = b.parentElement;
+    if (parent.classList.contains('card-actions') && parent.children.length === 1) parent.hidden = onboarded;
+  });
+  if (app.view === 'admin' && !canAdmin() && app.session) show('lottery', { push: false });
 }
+
+/** Dernière annonce de l'admin, en haut du tableau de bord (masquable). */
+function renderAnnouncement() {
+  const el = $('announcementBanner');
+  const dismissed = new Set(JSON.parse(store.get('dismissedAnnouncements') || '[]'));
+  const latest = (app.session?.announcements || []).find(a => !dismissed.has(a.id));
+  el.hidden = !latest;
+  if (!latest) return;
+  setHTML(el, `<span class="banner-icon"><svg class="icon"><use href="#i-megaphone"/></svg></span>
+    <div class="banner-text"><b>${esc(latest.title)}</b><p>${esc(latest.message)}</p><small class="muted">${esc(latest.author)} · ${timeAgo(latest.date)}</small></div>
+    <button class="dialog-close banner-close" data-dismiss-announcement="${esc(latest.id)}" aria-label="Masquer l’annonce"><svg class="icon"><use href="#i-close"/></svg></button>`);
+}
+
+document.addEventListener('click', event => {
+  const id = event.target.closest('[data-dismiss-announcement]')?.dataset.dismissAnnouncement;
+  if (!id) return;
+  const dismissed = new Set(JSON.parse(store.get('dismissedAnnouncements') || '[]'));
+  dismissed.add(id);
+  store.set('dismissedAnnouncements', JSON.stringify([...dismissed].slice(-50)));
+  renderAnnouncement();
+});
+
+/** Mode démo dans un navigateur qui a MetaMask : on rappelle que le solde est fictif et où trouver le mode blockchain. */
+const metaMaskInDemo = () => app.mode === 'demo' && Boolean(window.ethereum);
+
+function renderMetaMaskSwitch() {
+  const box = $('walletSwitch');
+  box.hidden = !metaMaskInDemo();
+  if (box.hidden) return;
+  setHTML(box, `<p>Ce solde est celui du <b>mode démo</b> (ETH fictif). MetaMask et tes ETH de test ne s’utilisent qu’en <b>mode blockchain</b>.</p><button class="btn btn-primary btn-sm" data-go-chain><svg class="icon"><use href="#i-cube"/></svg>Passer en mode blockchain</button>`);
+}
+
+/**
+ * Redirection vers le choix « Blockchain · MetaMask » des Réglages : la page s'y rend, le bouton est mis en évidence
+ * et reçoit le focus. Le joueur décide lui-même d'y passer : en mode démo, rien ne se connecte à MetaMask.
+ */
+function goToChainMode() {
+  $$('dialog[open]').forEach(d => d.close());
+  show('settings');
+  const option = document.querySelector('.mode-option[data-mode="chain"]');
+  setTimeout(() => {
+    option.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+    option.focus({ preventScroll: true });
+    option.classList.remove('spotlight');
+    void option.offsetWidth; // relance l'animation si on clique plusieurs fois
+    option.classList.add('spotlight');
+  }, 120);
+}
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-go-chain]')) goToChainMode();
+});
 
 function renderWallet() {
   const s = app.state;
   fx.countTo($('balance'), s.balance, fmtEth);
+  $('walletCard').classList.toggle('wallet-empty', s.balance <= 0); // illustration sans billet
+  renderMetaMaskSwitch();
   $('addressShort').textContent = short(s.address);
   $('addressAvatar').style.setProperty('--h', parseInt(s.address.slice(2, 6), 16) % 360);
+  const pseudo = app.session?.account?.pseudo;
+  $('walletGreeting').textContent = pseudo ? `Bonjour ${pseudo} ·` : '';
+  const verified = app.mode === 'chain' && sameAddress(app.session?.wallet?.address, s.address);
+  $('verifiedChip').hidden = !verified;
   const wins = s.transactions.filter(t => t.type === 'win').reduce((sum, t) => sum + t.amount, 0);
   fx.countTo($('statTickets'), s.myTickets, n => String(Math.round(n)));
   fx.countTo($('statRounds'), s.participations.length, n => String(Math.round(n)));
@@ -696,7 +784,7 @@ function renderPot() {
   $('progress').style.width = `${percent}%`;
   $('progressBar').setAttribute('aria-valuenow', String(Math.round(percent)));
   const remaining = Math.max(0, s.capacity - s.totalTickets);
-  $('remaining').textContent = remaining ? `${plural(remaining, 'ticket')} disponible${remaining > 1 ? 's' : ''}` : 'Tous les tickets sont vendus';
+  $('remaining').textContent = remaining ? `${plural(remaining, 'ticket')} disponible${remaining > 1 ? 's' : ''}` : s.capacity ? 'Tous les tickets sont vendus' : 'Aucun tirage en cours';
   $('participants').textContent = s.participants;
   const status = $('drawStatus');
   status.className = `status ${phase.cls}`;
@@ -722,15 +810,21 @@ function renderCountdown() {
     const value = String(parts[i]).padStart(2, '0');
     if (digit.textContent !== value) { digit.textContent = value; fx.pulse(digit, 'tick'); }
   });
-  // À zéro, le serveur démo effectue le tirage au prochain appel : on actualise tout de suite.
+  // À zéro, on actualise tout de suite pour afficher la suite (tirage démo, ou bouton « demander le tirage »).
   if (seconds === 0 && app.zeroRefreshed !== s.endsAt) { app.zeroRefreshed = s.endsAt; refresh(); }
 }
+
+/** Mode démo sans compte : portefeuille vide, il faut créer un compte pour recevoir 1 ETH fictif. */
+const isDemoGuest = () => app.mode === 'demo' && Boolean(app.session) && !app.session.account;
 
 function purchaseBlocker() {
   const s = app.state;
   const remaining = Math.max(0, s.capacity - s.totalTickets);
   if (s.closed) return 'closed';
   if (remaining === 0) return 'full';
+  if (isDemoGuest()) return 'guest';
+  if (playerLimitLeft() === 0) return 'limitReached';
+  if (app.quantity > playerLimitLeft()) return 'limit';
   if (app.quantity > remaining) return 'remaining';
   if (app.quantity > Math.floor((s.balance + 1e-9) / TICKET_PRICE)) return 'balance';
   return null;
@@ -742,6 +836,8 @@ function renderPurchase() {
   const q = app.quantity;
   const chain = app.mode === 'chain';
   const remaining = Math.max(0, s.capacity - s.totalTickets);
+  const limit = s.rules?.maxPerPlayer ?? MAX_PER_PURCHASE;
+  const left = playerLimitLeft();
   const blocker = purchaseBlocker();
   const share = ((s.myTickets + q) / (s.totalTickets + q)) * 100;
 
@@ -749,6 +845,11 @@ function renderPurchase() {
   $('chanceProgress').style.width = `${blocker ? 0 : share}%`;
   $('total').textContent = `${fmtEth(q * TICKET_PRICE)} ETH`;
   $('balanceAfter').textContent = blocker ? '—' : `${fmtEth(s.balance - q * TICKET_PRICE)} ETH`;
+
+  // Limite par joueur
+  setHTML($('limitInfo'), limit
+    ? `<span>Limite : <b>${limit}</b> tickets par joueur · tu en as <b>${s.myTickets}</b></span><span class="limit-track"><i style="width:${Math.min(100, (100 * s.myTickets) / limit)}%"></i></span>`
+    : '');
 
   const affordable = affordableTickets();
   $$('[data-quantity]').forEach(b => {
@@ -760,10 +861,13 @@ function renderPurchase() {
   $('plus').disabled = app.busy || q >= MAX_PER_PURCHASE;
 
   const buy = $('buy');
-  buy.disabled = app.busy || Boolean(blocker);
+  buy.disabled = app.busy || (Boolean(blocker) && blocker !== 'guest'); // invité : le bouton ouvre l'inscription
   const labels = {
+    guest: 'Créer un compte pour jouer',
     closed: 'Ventes closes',
     full: 'Plus aucun ticket disponible',
+    limitReached: 'Limite de tickets atteinte',
+    limit: `Plus que ${plural(left, 'ticket')} autorisé${left > 1 ? 's' : ''}`,
     remaining: `Plus que ${plural(remaining, 'ticket')} disponible${remaining > 1 ? 's' : ''}`,
     balance: 'Solde insuffisant',
   };
@@ -772,10 +876,15 @@ function renderPurchase() {
     : blocker ? labels[blocker] : `Acheter ${plural(q, 'ticket')}<svg class="icon"><use href="#i-arrow"/></svg>`);
 
   const help = {
+    guest: metaMaskInDemo()
+      ? 'En invité, ton portefeuille démo est vide. Crée un compte gratuit (1 ETH fictif offert), ou passe en mode blockchain pour jouer avec MetaMask.'
+      : 'En invité, ton portefeuille démo est vide. Crée un compte gratuit : tu reçois 1 ETH fictif pour jouer.',
     closed: chain ? 'Les ventes de ce tirage sont terminées : la bannière en haut indique la suite.' : 'Les ventes de ce tirage sont terminées.',
     full: 'Tous les tickets sont vendus : le tirage va avoir lieu.',
+    limitReached: `Tu as déjà ${limit} tickets : c’est le maximum par joueur, pour que chacun ait sa chance.`,
+    limit: `La limite est de ${limit} tickets par joueur : réduis la quantité.`,
     remaining: 'Réduis la quantité pour acheter les derniers tickets.',
-    balance: chain ? 'Ton solde ne suffit pas. Réduis la quantité, ou récupère des ETH de test sur un faucet.' : 'Ton solde ne suffit pas. Réduis la quantité.',
+    balance: chain ? 'Ton solde ne suffit pas. Réduis la quantité, ou récupère des ETH de test (tuto MetaMask).' : 'Ton solde ne suffit pas. Réduis la quantité.',
   };
   $('buyHelp').textContent = blocker ? help[blocker] : chain ? 'Des frais de transaction (gas) s’ajoutent, en ETH de test.' : 'Rien n’est débité avant ta confirmation.';
   $('buyHelp').classList.toggle('warn', Boolean(blocker));
@@ -799,6 +908,10 @@ function renderParticipation() {
     status.className = 'status';
     status.textContent = 'Perdu';
     $('odds').textContent = 'Pas cette fois : retente ta chance au prochain tirage.';
+  } else if (participation?.status === 'cancelled') {
+    status.className = 'status status-danger';
+    status.textContent = 'Annulé';
+    $('odds').textContent = 'Ce tirage a été annulé : ta mise t’est rendue.';
   } else {
     status.className = 'status status-live';
     status.textContent = 'En jeu';
@@ -817,7 +930,7 @@ function renderActivity() {
     const isNew = !firstRender && !seen.has(key);
     seen.add(key);
     const you = sameAddress(a.address, s.address) ? '<span class="you">toi</span>' : '';
-    return `<div class="activity-row ${isNew ? 'new' : ''}">${avatar(a.address)}<b>${esc(short(a.address))}${you}</b><span class="ticket-chip">${plural(a.quantity, 'ticket')}</span><time>${timeAgo(a.date)}</time></div>`;
+    return `<div class="activity-row ${isNew ? 'new' : ''}">${avatar(a.address, '', a.pseudo)}<b>${esc(displayName(a.address, a.pseudo))}${you}</b><span class="ticket-chip">${plural(a.quantity, 'ticket')}</span><time>${timeAgo(a.date)}</time></div>`;
   });
   app.seenActivity = seen;
   setHTML($('activity'), rows.length ? rows.join('') : empty('i-ticket', 'Aucun achat pour le moment. Sois le premier !'));
@@ -827,52 +940,65 @@ function renderChainBanner() {
   const el = $('chainBanner');
   const info = app.chain.info;
   if (app.mode !== 'chain' || !info) { el.hidden = true; return; }
-  const local = app.config.chainId === 31337;
   let icon = 'i-cube';
   let title = '';
   let text = '';
   let action = null;
   let warn = false;
+  const ownerAction = info.isOwner ? ['goAdmin', 'Créer un tirage'] : null;
   if (info.credits > 0) {
     icon = 'i-trophy';
     title = `${fmtEth(info.credits)} ETH t’attendent dans le contrat`;
     text = 'Clique pour les transférer vers ton portefeuille MetaMask.';
     action = ['withdraw', 'Retirer mes gains'];
+  } else if (info.refundTargets.length) {
+    warn = true;
+    title = 'Un tirage auquel tu participais a été annulé';
+    text = 'Ta mise est disponible : demande ton remboursement, puis retire-le.';
+    action = ['refund', 'Me faire rembourser'];
+  } else if (info.phase === 'none') {
+    title = 'Aucun tirage en cours';
+    text = info.isOwner ? 'Tu es l’administrateur : crée le premier tirage depuis l’espace admin.' : 'L’administrateur n’a pas encore créé de tirage. Reviens bientôt !';
+    action = ownerAction;
   } else if (info.phase === 'closable') {
     title = 'Les ventes sont closes';
-    text = 'N’importe quel joueur peut maintenant programmer le tirage : le contrat choisira un bloc futur pour désigner le gagnant.';
-    action = ['scheduleDraw', 'Programmer le tirage'];
-  } else if (info.phase === 'scheduled') {
-    const left = info.drawBlock - info.blockNumber;
-    warn = true;
-    title = `Tirage programmé au bloc ${info.drawBlock}`;
-    text = `Bloc actuel : ${info.blockNumber}. Encore ${plural(left, 'bloc')} avant de pouvoir lancer le tirage. `
-      + (local ? 'Sur Ganache, un bloc n’est créé qu’à chaque transaction : mine des blocs avec <code>evm_mine</code> (voir le README).' : 'Sur Sepolia, un bloc arrive environ toutes les 12 secondes.');
-  } else if (info.phase === 'drawable') {
+    text = 'N’importe quel joueur peut maintenant demander le tirage : le contrat demandera un nombre aléatoire à l’oracle Chainlink.';
+    action = ['requestDraw', 'Demander le tirage'];
+  } else if (info.phase === 'drawing') {
     icon = 'i-sparkle';
-    title = 'Le tirage peut être lancé';
-    text = `Le bloc ${info.drawBlock} est passé. N’importe qui peut lancer le tirage, pendant encore ${plural(info.drawBlock + DRAW_WINDOW - info.blockNumber, 'bloc')}.`;
-    action = ['draw', 'Lancer le tirage'];
-  } else if (info.phase === 'expired') {
+    const seconds = Math.max(0, Math.round((now() - info.requestedAt) / 1000));
+    title = 'L’oracle prépare un nombre aléatoire…';
+    text = `Demande n° ${esc(short(info.requestId || ''))} envoyée il y a ${seconds} s. `
+      + (isLocalChain() ? 'En local, le serveur BlockLucky joue le rôle de l’oracle : la réponse arrive en quelques secondes.' : 'Chainlink attend 3 blocs de confirmation, puis répond avec une preuve : comptez 1 à 2 minutes.');
+    if (isLocalChain() && seconds > 10) action = ['simulateOracle', 'Répondre à la place de l’oracle'];
+  } else if (info.phase === 'oracleTimeout') {
     warn = true;
-    title = 'Le délai du tirage est dépassé';
-    text = info.ticketCount > 0 ? 'Personne n’a lancé le tirage dans les 256 blocs. Tu peux récupérer ta mise.' : 'Personne n’a lancé le tirage dans les 256 blocs : chaque joueur peut se faire rembourser.';
-    if (info.ticketCount > 0) action = ['refund', 'Me faire rembourser'];
+    title = 'L’oracle n’a pas répondu depuis plus d’une heure';
+    text = 'N’importe qui peut annuler ce tirage : chaque joueur pourra alors récupérer sa mise.';
+    action = ['cancel', 'Annuler le tirage'];
   } else if (info.phase === 'settled') {
     icon = 'i-trophy';
-    title = sameAddress(info.winner, app.chain.account) ? 'Tu as gagné ce tirage !' : 'Ce tirage est terminé';
-    text = `Gagnant : ${esc(short(info.winner))}. Pour rejouer, déploie un nouveau contrat (<code>npm run deploy</code>), puis recharge la page.`;
+    const result = app.state.history[0];
+    title = result && sameAddress(result.winner, app.chain.account) ? 'Tu as gagné ce tirage !' : 'Ce tirage est terminé';
+    text = result ? `Ticket gagnant n° ${pad(result.winningTicket)} · ${esc(short(result.winner))} remporte ${fmtEth(result.prize)} ETH. Le prochain tirage sera créé par l’administrateur.` : '';
+    action = ownerAction ? ['goAdmin', 'Créer le tirage suivant'] : null;
+  } else if (info.phase === 'cancelled') {
+    warn = true;
+    title = 'Tirage annulé';
+    text = 'Chaque joueur peut récupérer sa mise. Le prochain tirage sera créé par l’administrateur.';
+    action = ownerAction;
   } else if (info.phase === 'empty') {
     warn = true;
     title = 'Tirage terminé sans participant';
-    text = 'Aucun ticket n’a été vendu avant la clôture. Déploie un nouveau contrat pour relancer un tirage.';
+    text = 'Aucun ticket n’a été vendu avant la clôture.';
+    action = ownerAction;
   } else {
     el.hidden = true;
     return;
   }
   el.className = `action-banner${warn ? ' warn' : ''}`;
-  setHTML(el, `<span class="banner-icon"><svg class="icon"><use href="#${icon}"/></svg></span><div class="banner-text"><b>${esc(title)}</b><p>${text}</p></div>`
-    + (action ? `<button class="btn btn-primary" data-chain-action="${action[0]}">${action[1]}</button>` : ''));
+  setHTML(el, `<span class="banner-icon${info.phase === 'drawing' ? ' spinning' : ''}"><svg class="icon"><use href="#${icon}"/></svg></span><div class="banner-text"><b>${esc(title)}</b><p>${text}</p></div>`
+    + (action ? (action[0] === 'goAdmin' ? `<a class="btn btn-primary" href="#admin" data-view="admin">${action[1]}</a>` : `<button class="btn btn-primary" data-chain-action="${action[0]}">${action[1]}</button>`) : ''));
   el.hidden = false;
 }
 
@@ -881,10 +1007,11 @@ function renderTickets() {
   const numbers = s.myTicketNumbers || [];
   const participation = getParticipations().find(p => p.round === s.round && p.status !== 'pending');
   const winning = participation?.winningTicket;
+  const cancelled = participation?.status === 'cancelled';
   setHTML($('myTickets'), numbers.length
     ? numbers.map((n, i) => {
-      const state = winning ? (n === winning ? 'won' : 'lost') : '';
-      const label = winning ? (n === winning ? 'GAGNANT' : 'TERMINÉ') : 'EN JEU';
+      const state = cancelled ? 'lost' : winning ? (n === winning ? 'won' : 'lost') : '';
+      const label = cancelled ? 'ANNULÉ' : winning ? (n === winning ? 'GAGNANT' : 'TERMINÉ') : 'EN JEU';
       return `<article class="ticket ${state}" style="--i:${Math.min(i, 24)}"><small>TIRAGE ${pad(s.round)} · ${label}</small><strong>N° ${pad(n)}</strong><small>${esc(short(s.address))} · 0,01 ETH</small></article>`;
     }).join('')
     : empty('i-ticket', 'Aucun ticket pour ce tirage.', '<a class="btn btn-primary btn-sm" href="#lottery" data-view="lottery">Acheter des tickets</a>'));
@@ -894,11 +1021,11 @@ function renderTickets() {
 function renderParticipations() {
   const filter = $('participationFilter').value;
   const entries = getParticipations().filter(p => filter === 'all' || p.status === filter);
-  const labels = { pending: ['En cours', 'status-live'], won: ['Gagné', 'status-win'], lost: ['Perdu', ''] };
+  const labels = { pending: ['En cours', 'status-live'], won: ['Gagné', 'status-win'], lost: ['Perdu', ''], cancelled: ['Annulé · remboursé', 'status-danger'] };
   setHTML($('pastParticipations'), entries.length
     ? entries.map(p => {
       const [label, cls] = labels[p.status] || labels.pending;
-      const amount = p.status === 'won' ? `+${fmtEth(p.prize)} ETH` : `${fmtEth(p.quantity * TICKET_PRICE)} ETH misés`;
+      const amount = p.status === 'won' ? `+${fmtEth(p.prize)} ETH` : `${fmtEth(p.quantity * TICKET_PRICE)} ETH ${p.status === 'cancelled' ? 'rendus' : 'misés'}`;
       const button = p.status === 'pending'
         ? '<a class="btn btn-ghost btn-sm" href="#lottery" data-view="lottery">Suivre le tirage</a>'
         : `<button class="btn btn-ghost btn-sm" data-result="${p.round}">Voir le résultat</button>`;
@@ -914,6 +1041,7 @@ function renderTransactions() {
     purchase: t => `Achat de ${plural(t.quantity, 'ticket')}`,
     win: () => 'Gain du tirage',
     refund: () => 'Remboursement crédité',
+    welcome: () => 'Cadeau de bienvenue (compte créé)',
     withdraw: () => 'Retrait vers ton portefeuille',
   };
   setHTML($('transactions'), rows.length
@@ -931,7 +1059,7 @@ function filteredHistory() {
   const query = $('historySearch').value.trim().toLowerCase();
   const mineOnly = $('historyFilter').value === 'mine';
   return s.history.filter(h => (!mineOnly || sameAddress(h.winner, s.address))
-    && (!query || String(h.round).includes(query) || pad(h.round).includes(query) || h.winner.toLowerCase().includes(query)));
+    && (!query || String(h.round).includes(query) || pad(h.round).includes(query) || (h.winner || '').toLowerCase().includes(query) || (h.winnerPseudo || '').toLowerCase().includes(query)));
 }
 
 function renderHistory() {
@@ -939,10 +1067,13 @@ function renderHistory() {
   const rows = filteredHistory();
   setHTML($('history'), rows.length
     ? rows.map(h => {
-      const mine = sameAddress(h.winner, s.address);
       const date = new Date(h.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+      if (h.cancelled) {
+        return `<article class="card history-row cancelled"><span class="round-badge">#${pad(h.round)}</span><div><div class="winner"><span class="status status-danger">Annulé</span></div><div class="meta">${plural(h.tickets, 'ticket')} remboursé${h.tickets > 1 ? 's' : ''} · ${date}</div></div><button class="btn btn-ghost btn-sm" data-result="${h.round}">Détails</button><strong class="prize muted">—</strong></article>`;
+      }
+      const mine = sameAddress(h.winner, s.address);
       const ticket = h.winningTicket ? ` · ticket n° ${pad(h.winningTicket)}` : '';
-      return `<article class="card history-row ${mine ? 'mine' : ''}"><span class="round-badge">#${pad(h.round)}</span><div><div class="winner">${avatar(h.winner)}${esc(short(h.winner))}${mine ? ' <span class="chip chip-accent">Toi</span>' : ''}</div><div class="meta">${plural(h.tickets, 'ticket')}${ticket} · ${date}</div></div><button class="btn btn-ghost btn-sm" data-result="${h.round}">Détails</button><strong class="prize">${fmtEth(h.prize)} ETH</strong></article>`;
+      return `<article class="card history-row ${mine ? 'mine' : ''}"><span class="round-badge">#${pad(h.round)}</span><div><div class="winner">${avatar(h.winner, '', h.winnerPseudo)}${esc(displayName(h.winner, h.winnerPseudo))}${mine ? ' <span class="chip chip-accent">Toi</span>' : ''}</div><div class="meta">${plural(h.tickets, 'ticket')}${ticket} · ${date}</div></div><button class="btn btn-ghost btn-sm" data-result="${h.round}">Détails</button><strong class="prize">${fmtEth(h.prize)} ETH</strong></article>`;
     }).join('')
     : empty('i-trophy', s.history.length ? 'Aucun résultat ne correspond à ta recherche.' : 'Aucun tirage terminé pour le moment.'));
 }
@@ -953,9 +1084,17 @@ function renderNotifications() {
   $('notificationCount').textContent = unread;
   $('notificationCount').hidden = unread === 0;
   $('notificationButton').setAttribute('aria-label', unread ? `Notifications : ${unread} non lue${unread > 1 ? 's' : ''}` : 'Notifications');
-  setHTML($('notificationList'), notifications.length
-    ? notifications.map(n => `<button class="notification-item ${n.read ? '' : 'unread'}" data-result="${n.round}"><span class="notification-state ${n.type === 'won' ? 'won' : ''}">${n.type === 'won' ? '+' : '✓'}</span><span><b>${n.type === 'won' ? `Tu remportes ${fmtEth(n.prize)} ETH !` : `Le tirage n° ${pad(n.round)} est terminé`}</b><small>Tirage n° ${pad(n.round)} · ${new Date(n.date).toLocaleDateString('fr-FR')}</small></span><svg class="icon"><use href="#i-arrow"/></svg></button>`).join('')
-    : empty('i-bell', 'Tes résultats apparaîtront ici.'));
+  const announcements = app.session?.announcements || [];
+  const titles = {
+    won: n => `Tu remportes ${fmtEth(n.prize)} ETH !`,
+    lost: n => `Le tirage n° ${pad(n.round)} est terminé`,
+    cancelled: n => `Tirage n° ${pad(n.round)} annulé : ${fmtEth(n.prize)} ETH rendus`,
+  };
+  setHTML($('notificationList'),
+    (announcements.length ? `<p class="label">Annonces</p>${announcements.map(a => `<div class="notification-item announcement"><span class="notification-state"><svg class="icon"><use href="#i-megaphone"/></svg></span><span><b>${esc(a.title)}</b><small>${esc(a.message)}</small></span><span></span></div>`).join('')}<p class="label">Tes tirages</p>` : '')
+    + (notifications.length
+      ? notifications.map(n => `<button class="notification-item ${n.read ? '' : 'unread'}" data-result="${n.round}"><span class="notification-state ${n.type === 'won' ? 'won' : ''}">${n.type === 'won' ? '+' : n.type === 'cancelled' ? '↺' : '✓'}</span><span><b>${(titles[n.type] || titles.lost)(n)}</b><small>Tirage n° ${pad(n.round)} · ${new Date(n.date).toLocaleDateString('fr-FR')}</small></span><svg class="icon"><use href="#i-arrow"/></svg></button>`).join('')
+      : empty('i-bell', 'Tes résultats apparaîtront ici.')));
 }
 
 function renderSettings() {
@@ -965,10 +1104,10 @@ function renderSettings() {
     b.disabled = app.busy;
   });
   $('chainOptionText').textContent = !window.ethereum
-    ? 'MetaMask n’est pas détecté dans ce navigateur : installe l’extension pour activer ce mode.'
+    ? 'MetaMask n’est pas détecté dans ce navigateur : clique pour suivre le tuto d’installation.'
     : !app.config
       ? 'Aucun contrat déployé pour l’instant : lance « npm run deploy », puis recharge la page.'
-      : `Les règles sont appliquées par un smart contract sur ${network().name} : personne ne peut tricher, pas même l’organisateur.`;
+      : `Les règles sont appliquées par un smart contract sur ${network().name}, et le hasard vient d’un oracle vérifiable.`;
   $('networkDescription').textContent = chain
     ? `Connecté à ${network().name} avec le compte ${short(app.chain.account)}. Chaque achat est une vraie transaction sur cette blockchain de test (validation : ${network().blockTime}).`
     : 'Mode démo : le serveur BlockLucky gère des crédits fictifs. Pratique pour découvrir, mais il faut faire confiance au serveur.';
@@ -977,34 +1116,37 @@ function renderSettings() {
     setHTML($('contractInfo'), '<dt>État</dt><dd>Aucun contrat déployé. Lance <code>npm run chain</code> puis <code>npm run deploy</code>, ou <code>npm run deploy:sepolia</code>.</dd>');
     $('explorerLink').hidden = true;
   } else {
+    const info = app.chain.info;
     setHTML($('contractInfo'), `<dt>Réseau</dt><dd>${esc(network().name)} (identifiant ${app.config.chainId})</dd>`
-      + `<dt>Adresse</dt><dd><code>${esc(app.config.address)}</code></dd>`
-      + `<dt>Déployé au bloc</dt><dd>${app.config.deployBlock ?? '—'}</dd>`
-      + `<dt>Règles</dt><dd>0,01 ETH par ticket · ${app.state?.capacity ?? 100} tickets maximum · 1 à 20 tickets par achat</dd>`);
-    const url = network().explorer ? `${network().explorer}/address/${app.config.address}` : null;
+      + `<dt>Usine à tirages</dt><dd><code>${esc(app.config.factory)}</code></dd>`
+      + (info?.lottery ? `<dt>Tirage en cours</dt><dd><code>${esc(info.lottery)}</code></dd>` : '')
+      + `<dt>Administrateur</dt><dd><code>${esc(short(app.config.owner))}</code></dd>`
+      + `<dt>Oracle</dt><dd>${app.config.vrf?.mode === 'mock' ? 'Chainlink VRF simulé (local)' : 'Chainlink VRF v2.5'}</dd>`
+      + (chain && app.state ? `<dt>Règles</dt><dd>0,01 ETH le ticket · ${app.state.capacity} tickets · ${app.state.rules.maxPerPlayer} max par joueur</dd>` : ''));
+    const url = network().explorer ? `${network().explorer}/address/${app.config.factory}` : null;
     $('explorerLink').hidden = !url;
     if (url) $('explorerLink').href = url;
   }
 
   const info = app.chain.info;
-  $('chainCycle').hidden = !(chain && info);
+  $('chainCycle').hidden = !(chain && info && info.phase !== 'none');
   if (!chain || !info) return;
-  const current = { open: 0, closable: 1, empty: 1, scheduled: 2, drawable: 3, expired: 3, settled: 4 }[info.phase];
+  const current = { open: 0, closable: 1, empty: 1, drawing: 2, oracleTimeout: 2, settled: 4, cancelled: -1, none: -1 }[info.phase];
   setHTML($('cycleSteps'), CYCLE.map(([title, text], i) => `<li class="${i < current ? 'done' : i === current ? 'current' : ''}"><b>${title}</b>${text}</li>`).join(''));
   const hints = {
     open: 'Les ventes sont ouvertes : achète des tickets depuis le tableau de bord.',
-    closable: 'Les ventes sont closes. Clique sur « Programmer le tirage ».',
-    empty: 'Aucun ticket vendu : ce tirage est terminé. Déploie un nouveau contrat pour rejouer.',
-    scheduled: `Attends que le bloc ${info.drawBlock} soit créé (bloc actuel : ${info.blockNumber}).`,
-    drawable: 'Le bloc est passé : clique sur « Lancer le tirage ».',
-    expired: 'Délai dépassé : chaque joueur peut se faire rembourser, puis retirer.',
-    settled: info.credits > 0 ? 'Le gagnant peut retirer sa cagnotte.' : 'Tirage terminé. Pour rejouer, déploie un nouveau contrat.',
+    closable: 'Les ventes sont closes. Clique sur « Demander le tirage ».',
+    empty: 'Aucun ticket vendu : ce tirage est terminé. L’administrateur peut en créer un nouveau.',
+    drawing: 'La demande est partie : l’oracle répond avec un nombre aléatoire et sa preuve.',
+    oracleTimeout: 'L’oracle n’a pas répondu à temps : n’importe qui peut annuler, puis chacun se fait rembourser.',
+    settled: info.credits > 0 ? 'Le gagnant peut retirer sa cagnotte.' : 'Tirage terminé. L’administrateur crée le suivant.',
+    cancelled: 'Tirage annulé : chaque joueur se fait rembourser, puis retire sa mise.',
   };
-  $('cycleHint').textContent = hints[info.phase];
-  $('scheduleDraw').disabled = app.busy || info.phase !== 'closable';
-  $('draw').disabled = app.busy || info.phase !== 'drawable';
-  $('refund').disabled = app.busy || !(info.phase === 'expired' && info.ticketCount > 0);
-  $('withdraw').disabled = app.busy || !(info.credits > 0);
+  $('cycleHint').textContent = hints[info.phase] || '';
+  $('requestDrawButton').disabled = app.busy || info.phase !== 'closable';
+  $('cancelDrawButton').disabled = app.busy || !(info.phase === 'oracleTimeout' || (info.isOwner && ['open', 'closable', 'drawing'].includes(info.phase)));
+  $('refundButton').disabled = app.busy || !info.refundTargets.length;
+  $('withdrawButton').disabled = app.busy || !(info.credits > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,13 +1154,17 @@ function renderSettings() {
 // ---------------------------------------------------------------------------
 function detectDraw() {
   const latest = app.state.history[0];
-  const key = latest ? `${app.mode}:${app.mode === 'chain' ? app.config.address : ''}:${latest.round}` : null;
+  const key = latest ? `${app.mode}:${app.mode === 'chain' ? app.config.factory : ''}:${latest.round}:${latest.cancelled ? 'x' : 'w'}` : null;
   if (app.seenDraw === undefined) { app.seenDraw = key; return; } // premier chargement : pas d'animation
   if (!key || key === app.seenDraw) return;
   app.seenDraw = key;
   const participation = getParticipations().find(p => p.round === latest.round && p.status !== 'pending');
+  if (latest.cancelled) {
+    toast(participation ? `Le tirage n° ${pad(latest.round)} a été annulé : ta mise t’est rendue.` : `Le tirage n° ${pad(latest.round)} a été annulé.`);
+    return;
+  }
   if (!participation) {
-    toast(`Le tirage n° ${pad(latest.round)} est terminé : ${short(latest.winner)} remporte ${fmtEth(latest.prize)} ETH.`);
+    toast(`Le tirage n° ${pad(latest.round)} est terminé : ${displayName(latest.winner, latest.winnerPseudo)} remporte ${fmtEth(latest.prize)} ETH.`);
     return;
   }
   const won = participation.status === 'won';
@@ -1029,24 +1175,25 @@ function detectDraw() {
     myNumbers: participation.ticketNumbers || [],
     won,
     prize: latest.prize,
-    winnerLabel: short(latest.winner),
+    winnerLabel: displayName(latest.winner, latest.winnerPseudo),
     formatEth: fmtEth,
   }).then(() => { if (won) fx.walletMoney($('walletCard'), 'in'); });
 }
 
 // ---------------------------------------------------------------------------
-// Achat
+// Transactions blockchain
 // ---------------------------------------------------------------------------
 function setBusy(busy) {
   app.busy = busy;
   $$('#purchaseDialog [data-close]').forEach(b => { b.disabled = busy; });
   renderPurchase();
   renderSettings();
+  admin?.render();
 }
 
 function resetTxSteps(list) {
-  setHTML(list, TX_STEPS.map(([title, text], i) => `<li><span class="step-dot">${i + 1}</span><div><b>${title}</b><small>${text}</small></div></li>`).join(''));
   list._html = null;
+  list.innerHTML = TX_STEPS.map(([title, text], i) => `<li><span class="step-dot">${i + 1}</span><div><b>${title}</b><small>${text}</small></div></li>`).join('');
 }
 
 function setTxStep(list, index) {
@@ -1073,14 +1220,97 @@ async function trackTx(list, send) {
   return receipt;
 }
 
+/** Sur Ganache, l'estimation du gaz ignore le temps avancé (evm_increaseTime) : on fixe une limite. */
+const localGas = gasLimit => (isLocalChain() ? { gasLimit } : {});
+
+const CHAIN_ACTIONS = {
+  requestDraw: {
+    title: 'Demander le tirage',
+    text: 'Le contrat demande un nombre aléatoire à l’oracle Chainlink. Personne, pas même l’admin, ne peut connaître ni choisir ce nombre.',
+    send: () => lotteryContract(app.chain.info.lottery).requestDraw(localGas(500000)),
+    done: 'Demande envoyée à l’oracle : le résultat arrive bientôt.',
+  },
+  cancel: {
+    title: 'Annuler le tirage',
+    text: 'Le tirage sera annulé : chaque joueur pourra récupérer sa mise. Aucun gagnant ne sera désigné.',
+    send: () => lotteryContract(app.chain.info.lottery).cancel(localGas(150000)),
+    done: 'Tirage annulé : chaque joueur peut se faire rembourser.',
+  },
+  refund: {
+    title: 'Me faire rembourser',
+    text: 'Ta mise est créditée dans le contrat. Tu pourras ensuite la retirer vers ton portefeuille.',
+    send: () => lotteryContract(app.chain.info.refundTargets[0].address).refund(),
+    done: 'Remboursement crédité. Retire-le maintenant vers ton portefeuille.',
+  },
+  withdraw: {
+    title: 'Retirer mes gains',
+    text: 'Le contrat t’envoie les ETH qui t’attendent.',
+    send: () => lotteryContract(app.chain.info.creditTargets[0].address).withdraw(),
+    done: 'Les ETH sont arrivés dans ton portefeuille !',
+  },
+  createLottery: {
+    title: 'Créer un nouveau tirage',
+    text: 'L’usine déploie un nouveau contrat de tirage avec les règles choisies.',
+    send: ({ duration, capacity, maxPerPlayer }) => app.chain.factory.createLottery(duration, capacity, maxPerPlayer, localGas(3000000)),
+    done: 'Nouveau tirage créé : les ventes sont ouvertes !',
+  },
+  fundOracle: {
+    title: 'Alimenter la réserve de l’oracle',
+    text: 'Ces ETH de test paieront Chainlink à chaque tirage.',
+    send: ({ amount }) => app.chain.factory.fundOracle({ value: parseEther(String(amount)) }),
+    done: 'Réserve de l’oracle alimentée.',
+  },
+  simulateOracle: {
+    title: 'Répondre à la place de l’oracle',
+    text: 'Simulation locale uniquement : sur Ganache il n’y a pas de nœud Chainlink. Sur Sepolia, seul Chainlink peut répondre.',
+    send: () => {
+      const mock = new Contract(app.config.vrf.coordinator, app.config.abi.coordinator, app.chain.signer);
+      const random = BigInt('0x' + [...crypto.getRandomValues(new Uint8Array(32))].map(b => b.toString(16).padStart(2, '0')).join(''));
+      return mock.fulfillRandomWords(app.chain.info.requestId, random);
+    },
+    done: 'Réponse de l’oracle simulée.',
+  },
+};
+
+async function runChainAction(method, params = {}) {
+  const action = CHAIN_ACTIONS[method];
+  if (!action || app.busy || app.mode !== 'chain' || !app.chain.factory) return;
+  $('txTitle').textContent = action.title;
+  $('txDescription').textContent = action.text;
+  resetTxSteps($('txSteps'));
+  $('txDialog').showModal();
+  setBusy(true);
+  try {
+    await trackTx($('txSteps'), () => action.send(params));
+    toast(action.done, 'success');
+    if (method === 'withdraw') { fx.walletMoney($('walletCard'), 'in'); fx.confetti({ particles: 120 }); }
+    await new Promise(resolve => setTimeout(resolve, 700));
+  } catch (error) {
+    toast(errorMessage(error), 'error');
+  } finally {
+    setBusy(false);
+    closeDialog($('txDialog'));
+    await refresh();
+  }
+}
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-chain-action]');
+  if (button && !button.disabled) runChainAction(button.dataset.chainAction);
+});
+
+// ---------------------------------------------------------------------------
+// Achat
+// ---------------------------------------------------------------------------
 $('buy').addEventListener('click', () => {
   if (app.busy || !app.state) return;
   setQuantity($('quantity').value, { animate: false });
+  if (purchaseBlocker() === 'guest') { account.open('register'); return; }
   if ($('buy').disabled) return;
   const s = app.state;
   const q = app.quantity;
   const chain = app.mode === 'chain';
-  app.pending = { quantity: q, round: s.round, mode: app.mode, requestId: crypto.randomUUID().replaceAll('-', '') };
+  app.pending = { quantity: q, round: s.round, mode: app.mode, lottery: app.chain.info?.lottery, requestId: crypto.randomUUID().replaceAll('-', '') };
   setHTML($('purchaseSummary'), `
     <div class="summary-row"><span>Tirage</span><strong>n° ${pad(s.round)}</strong></div>
     <div class="summary-row"><span>Tickets</span><strong>${q} × 0,01 ETH</strong></div>
@@ -1112,7 +1342,8 @@ $('confirmPurchase').addEventListener('click', async () => {
       const result = await api('/api/tickets', { quantity: purchase.quantity, round: purchase.round, requestId: purchase.requestId });
       toast(result.message, 'success');
     } else {
-      await trackTx($('purchaseSteps'), () => app.chain.contract.buyTickets(purchase.quantity, { value: parseEther((purchase.quantity * TICKET_PRICE).toFixed(2)) }));
+      // Le dernier ticket déclenche aussi la demande à l'oracle : on prévoit plus de gaz en local.
+      await trackTx($('purchaseSteps'), () => lotteryContract(purchase.lottery).buyTickets(purchase.quantity, { value: parseEther((purchase.quantity * TICKET_PRICE).toFixed(2)), ...localGas(1500000) }));
       toast('Achat confirmé sur la blockchain !', 'success');
     }
     app.pending = null;
@@ -1130,36 +1361,6 @@ $('confirmPurchase').addEventListener('click', async () => {
     if (app.busy) setBusy(false);
     confirm.disabled = false;
   }
-});
-
-// ---------------------------------------------------------------------------
-// Actions du contrat (programmer, tirer, rembourser, retirer)
-// ---------------------------------------------------------------------------
-async function runChainAction(method) {
-  const action = CHAIN_ACTIONS[method];
-  if (!action || app.busy || app.mode !== 'chain' || !app.chain.contract) return;
-  $('txTitle').textContent = action.title;
-  $('txDescription').textContent = action.text;
-  resetTxSteps($('txSteps'));
-  $('txDialog').showModal();
-  setBusy(true);
-  try {
-    await trackTx($('txSteps'), () => action.send(app.chain.contract));
-    toast(action.done, 'success');
-    if (method === 'withdraw') { fx.walletMoney($('walletCard'), 'in'); fx.confetti({ particles: 120 }); }
-    await new Promise(resolve => setTimeout(resolve, 700));
-  } catch (error) {
-    toast(errorMessage(error), 'error');
-  } finally {
-    setBusy(false);
-    closeDialog($('txDialog'));
-    refresh();
-  }
-}
-
-document.addEventListener('click', event => {
-  const button = event.target.closest('[data-chain-action]');
-  if (button && !button.disabled) runChainAction(button.dataset.chainAction);
 });
 
 // ---------------------------------------------------------------------------
@@ -1203,7 +1404,9 @@ $('wallet').addEventListener('click', () => {
   $('dialogBalance').textContent = `${fmtEth(app.state.balance)} ETH`;
   $('dialogDescription').textContent = chain
     ? `Portefeuille MetaMask · ${network().name} · ETH de test.`
-    : 'Portefeuille de démonstration : crédits fictifs, sans valeur. Il est lié à ce navigateur (effacer les cookies en crée un nouveau).';
+    : app.session?.account
+      ? `Portefeuille de démonstration du compte ${app.session.account.pseudo} : crédits fictifs, retrouvés sur tous tes appareils.`
+      : 'Portefeuille de démonstration vide : crée un compte gratuit pour recevoir 1 ETH fictif et jouer.';
   $('dialogAddress').textContent = app.state.address;
   const url = explorerUrl('address', app.state.address);
   $('dialogExplorer').hidden = !url;
@@ -1221,7 +1424,7 @@ $('notificationButton').addEventListener('click', async () => {
     if (app.mode === 'demo') {
       await api('/api/notifications/read', { ids: unread.map(n => n.id) });
     } else {
-      const key = 'read.' + app.config.address;
+      const key = 'read.' + app.config.factory;
       const read = new Set(JSON.parse(store.get(key) || '[]'));
       unread.forEach(n => read.add(n.id));
       store.set(key, JSON.stringify([...read]));
@@ -1238,20 +1441,28 @@ function openResult(round) {
   const entry = s?.history.find(h => h.round === round);
   if (!entry) { toast('Ce résultat n’est plus disponible.', 'error'); return; }
   const participation = getParticipations().find(p => p.round === round);
-  const won = sameAddress(entry.winner, s.address);
   closeDialog($('notificationsDialog'));
-  $('resultTitle').textContent = `Tirage n° ${pad(round)}`;
-  const v = entry.verification;
+  $('resultTitle').textContent = `Résultat du tirage n° ${pad(round)}`;
+  if (entry.cancelled) {
+    setHTML($('resultDetails'), `<div class="result-outcome">Tirage annulé</div><div class="summary"><div class="summary-row"><span>Tickets vendus</span><strong>${entry.tickets}</strong></div>${participation ? `<div class="summary-row"><span>Ta mise rendue</span><strong>${fmtEth(participation.quantity * TICKET_PRICE)} ETH</strong></div>` : ''}</div><p class="muted small">Aucun gagnant n’a été désigné : chaque joueur récupère sa mise.</p>`);
+    $('resultDialog').showModal();
+    return;
+  }
+  const won = sameAddress(entry.winner, s.address);
+  const chain = app.mode === 'chain';
+  const verification = chain && entry.randomWord
+    ? `<div class="verify"><b>Vérification du hasard :</b> l’oracle a fourni le nombre <code>${esc(entry.randomWord)}</code>. Reste de sa division par ${entry.tickets} tickets = ${(BigInt(entry.randomWord) % BigInt(entry.tickets)).toString()}, donc ticket n° ${pad(entry.winningTicket)}. N’importe qui peut refaire ce calcul.${app.config.vrf?.mode === 'chainlink' ? ` <a href="https://vrf.chain.link/sepolia/${esc(app.config.vrf.subscriptionId)}" target="_blank" rel="noopener">Voir la preuve chez Chainlink ↗</a>` : ' (Oracle simulé en local.)'}</div>`
+    : !chain ? '<div class="verify">Mode démo : le ticket gagnant est tiré par le serveur avec un générateur aléatoire cryptographique. En mode blockchain, c’est l’oracle Chainlink qui le fournit, avec une preuve.</div>' : '';
   setHTML($('resultDetails'), `
     <div class="result-outcome ${won ? 'won' : ''}">${won ? `Tu remportes ${fmtEth(entry.prize)} ETH !` : participation ? 'Pas cette fois…' : 'Tirage terminé'}</div>
     <div class="summary">
       <div class="summary-row"><span>Cagnotte</span><strong>${fmtEth(entry.prize)} ETH</strong></div>
-      <div class="summary-row"><span>Gagnant</span><strong>${esc(short(entry.winner))}${won ? ' (toi)' : ''}</strong></div>
+      <div class="summary-row"><span>Gagnant</span><strong>${esc(displayName(entry.winner, entry.winnerPseudo))}${won ? ' (toi)' : ''}</strong></div>
       ${entry.winningTicket ? `<div class="summary-row"><span>Ticket gagnant</span><strong>N° ${pad(entry.winningTicket)} sur ${entry.tickets}</strong></div>` : ''}
       ${participation ? `<div class="summary-row"><span>Ta participation</span><strong>${plural(participation.quantity, 'ticket')} · ${fmtEth(participation.quantity * TICKET_PRICE)} ETH</strong></div>` : ''}
     </div>
     ${participation?.ticketNumbers?.length ? `<p class="label">Tes numéros</p><div class="result-numbers">${participation.ticketNumbers.map(n => `<span class="${n === entry.winningTicket ? 'winner-number' : ''}">${pad(n)}</span>`).join('')}</div>` : ''}
-    ${v ? `<div class="verify"><b>Vérification :</b> hash du bloc ${v.drawBlock} = ${esc(v.hash)}. keccak256(hash, adresse du contrat) modulo ${entry.tickets} = ${v.index}, donc ticket n° ${pad(v.winningTicket)}. N’importe qui peut refaire ce calcul.</div>` : ''}`);
+    ${verification}`);
   $('resultDialog').showModal();
 }
 
@@ -1281,8 +1492,8 @@ $('exportHistory').addEventListener('click', () => {
   const rows = app.state ? filteredHistory() : [];
   if (!rows.length) { toast('Aucun résultat à exporter.', 'error'); return; }
   downloadCsv('blocklucky-resultats.csv', [
-    ['Tirage', 'Gagnant', 'Ticket gagnant', 'Tickets', 'Gain (ETH)', 'Date'],
-    ...rows.map(h => [h.round, h.winner, h.winningTicket ?? '', h.tickets, h.prize, new Date(h.date).toISOString()]),
+    ['Tirage', 'Statut', 'Gagnant', 'Ticket gagnant', 'Tickets', 'Gain (ETH)', 'Date'],
+    ...rows.map(h => [h.round, h.cancelled ? 'Annulé' : 'Terminé', h.winner ?? '', h.winningTicket ?? '', h.tickets, h.prize, new Date(h.date).toISOString()]),
   ]);
 });
 
@@ -1298,7 +1509,7 @@ $('transactions').addEventListener('click', async event => {
         ...app.state.transactions.find(t => t.id === id),
         address: app.state.address,
         network: network().name,
-        contract: app.config.address,
+        factory: app.config.factory,
         explorer: explorerUrl('tx', id),
       };
     download(`blocklucky-recu-${id.slice(0, 18)}.json`, JSON.stringify(receipt, null, 2), 'application/json');
@@ -1327,8 +1538,21 @@ $('calendarReminder').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tuto
+// Modules : compte, tuto MetaMask, espace admin, visite guidée
 // ---------------------------------------------------------------------------
+const ctx = {
+  app, refresh, render, show, network, now, ensureNetwork, setMode, runChainAction, readOracle, errorMessage, goToChainMode,
+  phase: currentPhase,
+  openOnboarding: () => onboarding.open(),
+};
+const account = initAccount(ctx);
+const onboarding = initOnboarding(ctx);
+const admin = initAdmin(ctx);
+
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-open-onboarding]')) { $$('dialog[open]').forEach(d => d.close()); onboarding.open(); }
+});
+
 const tour = new Tour({
   steps: TOUR_STEPS,
   showView: view => show(view, { push: false }), // le tuto n'ajoute pas d'entrées à l'historique du navigateur
@@ -1358,6 +1582,7 @@ async function init() {
   resetTxSteps($('txSteps'));
   fx.tilt($('walletCard'));
   fx.pointerGlow();
+  setLive(false);
 
   const saved = Number(store.get('quantity'));
   if (saved >= 1 && saved <= MAX_PER_PURCHASE) {
@@ -1366,9 +1591,6 @@ async function init() {
   }
   $('quantity').value = app.quantity;
 
-  show(hashView(), { push: false });
-  history.replaceState(null, '', '#' + app.view);
-
   app.config = await loadConfig();
   // Reconnexion silencieuse si l'utilisateur avait choisi le mode blockchain.
   if (store.get('mode') === 'chain' && window.ethereum && app.config) {
@@ -1376,9 +1598,17 @@ async function init() {
   }
   render();
   await refresh({ silent: false });
+  show(hashView(), { push: false }); // après le chargement : l'espace admin dépend de la session
+  history.replaceState(null, '', '#' + app.view);
 
+  connectStream();
   setInterval(renderCountdown, 1000);
-  setInterval(() => { if (!app.busy && !document.hidden) refresh(); }, REFRESH_EVERY);
+  // Filet de sécurité : actualisation lente si le temps réel est connecté, rapide sinon.
+  const poll = () => {
+    if (!app.busy && !document.hidden) refresh();
+    setTimeout(poll, app.live ? 20000 : 6000);
+  };
+  setTimeout(poll, 6000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
   if (!store.get('tourDone')) setTimeout(() => tour.start(), 900);
