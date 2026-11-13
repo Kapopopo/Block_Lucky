@@ -2,7 +2,7 @@
 // Compte joueur (e-mail + mot de passe) et connexion avec Ethereum (signature MetaMask).
 // ---------------------------------------------------------------------------
 import { BrowserProvider } from '/vendor/ethers.js';
-import { $, $$, api, toast, esc, short, avatar, sameAddress } from './common.js';
+import { $, $$, api, toast, esc, short, avatar, sameAddress, download } from './common.js';
 
 /**
  * Connexion avec Ethereum (« Sign-In with Ethereum ») :
@@ -21,7 +21,10 @@ export async function signInWithEthereum() {
 
 export function initAccount(ctx) {
   const dialog = $('accountDialog');
-  let tab = 'register';
+  let tab = 'register'; // register | login | forgot (mot de passe oublié) | reset (nouveau mot de passe)
+  // Lien « mot de passe oublié » : #reset=<jeton>. On le lit tout de suite, avant que le site ne réécrive l'adresse.
+  const readResetLink = () => location.hash.match(/^#reset=([a-f0-9]{48})$/)?.[1] || null;
+  let resetToken = readResetLink();
   let welcome = false;
   let showForms = false; // connecté avec MetaMask : formulaires e-mail repliés par défaut
 
@@ -36,6 +39,12 @@ export function initAccount(ctx) {
   function showError(message) {
     $('accountError').textContent = message || '';
     $('accountError').hidden = !message;
+    if (message) showInfo('');
+  }
+
+  function showInfo(message) {
+    $('accountInfo').textContent = message || '';
+    $('accountInfo').hidden = !message;
   }
 
   function render() {
@@ -58,9 +67,13 @@ export function initAccount(ctx) {
       $('walletProfileRole').className = `chip ${owner ? 'chip-gold' : 'chip-accent'}`;
     }
     $('accountWelcome').hidden = !welcome;
-    $$('[data-account-tab]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.accountTab === tab)));
+    $$('.tabs [data-account-tab]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.accountTab === (tab === 'forgot' ? 'login' : tab))));
+    $('accountGuest').querySelector('.tabs').hidden = tab === 'reset';
     $('registerForm').hidden = tab !== 'register';
     $('loginForm').hidden = tab !== 'login';
+    $('forgotForm').hidden = tab !== 'forgot';
+    $('resetForm').hidden = tab !== 'reset';
+    if (!account) $('deleteForm').hidden = true;
     if (account) {
       $('profileAvatar').innerHTML = avatar(ctx.app.state?.address || '0x00', 'avatar-xl', account.pseudo);
       $('profilePseudo').textContent = account.pseudo;
@@ -112,6 +125,7 @@ export function initAccount(ctx) {
     showForms = Boolean(nextTab);
     if (nextTab) tab = nextTab;
     showError('');
+    showInfo('');
     render();
     dialog.showModal();
   }
@@ -132,7 +146,76 @@ export function initAccount(ctx) {
     }
   }
 
-  $$('[data-account-tab]').forEach(b => b.addEventListener('click', () => { tab = b.dataset.accountTab; showError(''); render(); }));
+  $$('[data-account-tab]').forEach(b => b.addEventListener('click', () => { tab = b.dataset.accountTab; showError(''); showInfo(''); render(); }));
+
+  // ----- Mot de passe oublié -----
+  $('forgotForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    showError('');
+    try {
+      const { message } = await api('/api/account/forgot', { email: form.elements.email.value });
+      form.reset();
+      showInfo(message);
+    } catch (error) { showError(error.message); } finally { button.disabled = false; }
+  });
+
+  $('resetForm').addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    submit(form, '/api/account/reset', { token: resetToken, password: form.elements.password.value }, () => {
+      resetToken = null;
+      tab = 'login';
+      render();
+      toast('Nouveau mot de passe enregistré : tu es connecté.', 'success');
+    });
+  });
+
+  // ----- Droits sur les données (RGPD) -----
+  $('exportDataButton').addEventListener('click', async () => {
+    try {
+      const res = await fetch('/api/account/export');
+      if (!res.ok) throw new Error((await res.json()).error || 'Export impossible.');
+      download('blocklucky-mes-donnees.json', await res.text(), 'application/json');
+      toast('Tes données sont téléchargées (fichier JSON).', 'success');
+    } catch (error) { toast(error.message, 'error'); }
+  });
+
+  $('deleteAccountToggle').addEventListener('click', () => {
+    $('deleteForm').hidden = !$('deleteForm').hidden;
+    if (!$('deleteForm').hidden) $('deleteForm').elements.password.focus();
+  });
+  $('deleteCancel').addEventListener('click', () => { $('deleteForm').reset(); $('deleteForm').hidden = true; });
+  $('deleteForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await api('/api/account/delete', { password: form.elements.password.value });
+      form.reset();
+      form.hidden = true;
+      tab = 'register';
+      await ctx.refresh({ silent: false });
+      render();
+      toast('Ton compte et ses données ont été supprimés.', 'success');
+    } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
+  });
+
+  // Arrivée par le lien reçu (nouvel onglet, ou lien ouvert dans un onglet où le site est déjà chargé) :
+  // on ouvre directement le choix du nouveau mot de passe, et le jeton disparaît de la barre d'adresse.
+  function openResetLink() {
+    const token = readResetLink() || resetToken;
+    if (!token) return;
+    resetToken = token;
+    history.replaceState(null, '', location.pathname + location.search);
+    if (dialog.open) dialog.close();
+    open('reset');
+  }
+  window.addEventListener('hashchange', () => { if (readResetLink()) openResetLink(); });
+  if (resetToken) setTimeout(openResetLink, 0);
 
   $('registerForm').addEventListener('submit', event => {
     event.preventDefault();

@@ -226,6 +226,8 @@ window.addEventListener('popstate', () => show(hashView(), { push: false }));
 // ---------------------------------------------------------------------------
 // Quantité de tickets
 // ---------------------------------------------------------------------------
+/** Tickets du joueur dans un tirage encore en cours (le mode démo repart à zéro à chaque tirage). */
+const ticketsInPlay = () => app.state?.ticketsInPlay ?? app.state?.myTickets ?? 0;
 const playerLimitLeft = () => Math.max(0, (app.state?.rules?.maxPerPlayer ?? MAX_PER_PURCHASE) - (app.state?.myTickets ?? 0));
 
 function affordableTickets() {
@@ -388,6 +390,13 @@ function disconnectChain() {
 }
 
 const lotteryContract = address => new Contract(address, app.config.abi.lottery, app.chain.signer);
+/**
+ * Contrats déployés depuis la version « clones » : le remboursement renvoie directement la mise (une transaction).
+ * Les anciens contrats créditaient d'abord la mise, à retirer ensuite : le site gère les deux.
+ */
+const directRefund = () => Boolean(app.config?.abi?.lottery?.some(f => f.name === 'initialize'));
+/** Le serveur (ou Chainlink Automation) clôture les ventes à l'échéance : personne n'a besoin de cliquer. */
+const autoClose = () => Boolean(app.session?.autoClose);
 
 async function getBlock(number) {
   const c = app.chain;
@@ -477,8 +486,9 @@ function buildRounds(account) {
     r.myNumbers = r.mine.flatMap(p => p.numbers);
     r.myStake = r.myNumbers.length * TICKET_PRICE;
     r.iWon = Boolean(r.win && sameAddress(r.win.winner, account));
-    // Crédits restant à retirer dans ce tirage : gain + remboursement − retraits.
-    r.credits = Math.max(0, Math.round(((r.iWon ? r.win.prize : 0) + r.myRefunds - r.myWithdrawals) * 1e6) / 1e6);
+    // Crédits restant à retirer dans ce tirage : gain (+ remboursement crédité, anciens contrats) − retraits.
+    const credited = (r.iWon ? r.win.prize : 0) + (directRefund() ? 0 : r.myRefunds);
+    r.credits = Math.max(0, Math.round((credited - r.myWithdrawals) * 1e6) / 1e6);
     r.refundable = Boolean(r.cancelled && r.myStake - r.myRefunds > 1e-9);
   }
   return rounds;
@@ -566,6 +576,8 @@ async function readChain() {
     pot: total * TICKET_PRICE,
     myTickets: current?.myNumbers.length ?? 0,
     myTicketNumbers: current?.myNumbers ?? [],
+    // Tickets encore en jeu : 0 dès que le tirage est terminé ou annulé (même avant le tirage suivant).
+    ticketsInPlay: ['open', 'closable', 'drawing', 'oracleTimeout'].includes(phase) ? current?.myNumbers.length ?? 0 : 0,
     balance: Number(formatEther(balance)),
     address: c.account,
     pseudo: app.session?.account?.pseudo ?? null,
@@ -691,7 +703,7 @@ function renderShell() {
   $('networkChipText').textContent = chain ? `${network().name} · ETH de test` : 'Démo · ETH fictif';
   $('walletLabel').textContent = app.state ? `${fmtEth(app.state.balance)} ETH` : '—';
   $$('[data-ticket-badge]').forEach(badge => {
-    const count = app.state?.myTickets ?? 0;
+    const count = ticketsInPlay();
     if (badge.textContent !== String(count)) { badge.textContent = count; fx.pulse(badge); }
     badge.classList.toggle('has', count > 0);
   });
@@ -755,6 +767,7 @@ function goToChainMode() {
 }
 document.addEventListener('click', event => {
   if (event.target.closest('[data-go-chain]')) goToChainMode();
+  if (event.target.closest('[data-open-privacy]')) $('privacyDialog').showModal(); // s'ouvre par-dessus « Mon compte »
 });
 
 function renderWallet() {
@@ -769,7 +782,7 @@ function renderWallet() {
   const verified = app.mode === 'chain' && sameAddress(app.session?.wallet?.address, s.address);
   $('verifiedChip').hidden = !verified;
   const wins = s.transactions.filter(t => t.type === 'win').reduce((sum, t) => sum + t.amount, 0);
-  fx.countTo($('statTickets'), s.myTickets, n => String(Math.round(n)));
+  fx.countTo($('statTickets'), ticketsInPlay(), n => String(Math.round(n)));
   fx.countTo($('statRounds'), s.participations.length, n => String(Math.round(n)));
   fx.countTo($('statWins'), wins, n => fmtEth(n) + ' ETH');
 }
@@ -954,7 +967,9 @@ function renderChainBanner() {
   } else if (info.refundTargets.length) {
     warn = true;
     title = 'Un tirage auquel tu participais a été annulé';
-    text = 'Ta mise est disponible : demande ton remboursement, puis retire-le.';
+    text = directRefund()
+      ? 'Ta mise t’attend : un clic, et elle revient directement sur ton portefeuille MetaMask.'
+      : 'Ta mise est disponible : demande ton remboursement, puis retire-le.';
     action = ['refund', 'Me faire rembourser'];
   } else if (info.phase === 'none') {
     title = 'Aucun tirage en cours';
@@ -962,7 +977,9 @@ function renderChainBanner() {
     action = ownerAction;
   } else if (info.phase === 'closable') {
     title = 'Les ventes sont closes';
-    text = 'N’importe quel joueur peut maintenant demander le tirage : le contrat demandera un nombre aléatoire à l’oracle Chainlink.';
+    text = autoClose()
+      ? 'Le tirage est demandé automatiquement dans quelques secondes. Tu peux aussi le lancer toi-même : le contrat demandera un nombre aléatoire à l’oracle Chainlink.'
+      : 'N’importe quel joueur peut maintenant demander le tirage : le contrat demandera un nombre aléatoire à l’oracle Chainlink.';
     action = ['requestDraw', 'Demander le tirage'];
   } else if (info.phase === 'drawing') {
     icon = 'i-sparkle';
@@ -1040,7 +1057,7 @@ function renderTransactions() {
   const labels = {
     purchase: t => `Achat de ${plural(t.quantity, 'ticket')}`,
     win: () => 'Gain du tirage',
-    refund: () => 'Remboursement crédité',
+    refund: () => (directRefund() ? 'Remboursement reçu' : 'Remboursement crédité'),
     welcome: () => 'Cadeau de bienvenue (compte créé)',
     withdraw: () => 'Retrait vers ton portefeuille',
   };
@@ -1135,12 +1152,12 @@ function renderSettings() {
   setHTML($('cycleSteps'), CYCLE.map(([title, text], i) => `<li class="${i < current ? 'done' : i === current ? 'current' : ''}"><b>${title}</b>${text}</li>`).join(''));
   const hints = {
     open: 'Les ventes sont ouvertes : achète des tickets depuis le tableau de bord.',
-    closable: 'Les ventes sont closes. Clique sur « Demander le tirage ».',
+    closable: autoClose() ? 'Les ventes sont closes : le tirage est demandé automatiquement.' : 'Les ventes sont closes. Clique sur « Demander le tirage ».',
     empty: 'Aucun ticket vendu : ce tirage est terminé. L’administrateur peut en créer un nouveau.',
     drawing: 'La demande est partie : l’oracle répond avec un nombre aléatoire et sa preuve.',
     oracleTimeout: 'L’oracle n’a pas répondu à temps : n’importe qui peut annuler, puis chacun se fait rembourser.',
     settled: info.credits > 0 ? 'Le gagnant peut retirer sa cagnotte.' : 'Tirage terminé. L’administrateur crée le suivant.',
-    cancelled: 'Tirage annulé : chaque joueur se fait rembourser, puis retire sa mise.',
+    cancelled: directRefund() ? 'Tirage annulé : chaque joueur récupère sa mise en un clic.' : 'Tirage annulé : chaque joueur se fait rembourser, puis retire sa mise.',
   };
   $('cycleHint').textContent = hints[info.phase] || '';
   $('requestDrawButton').disabled = app.busy || info.phase !== 'closable';
@@ -1238,9 +1255,9 @@ const CHAIN_ACTIONS = {
   },
   refund: {
     title: 'Me faire rembourser',
-    text: 'Ta mise est créditée dans le contrat. Tu pourras ensuite la retirer vers ton portefeuille.',
+    get text() { return directRefund() ? 'Le contrat te renvoie ta mise, directement sur ton portefeuille.' : 'Ta mise est créditée dans le contrat. Tu pourras ensuite la retirer vers ton portefeuille.'; },
     send: () => lotteryContract(app.chain.info.refundTargets[0].address).refund(),
-    done: 'Remboursement crédité. Retire-le maintenant vers ton portefeuille.',
+    get done() { return directRefund() ? 'Remboursé : ta mise est revenue sur ton portefeuille.' : 'Remboursement crédité. Retire-le maintenant vers ton portefeuille.'; },
   },
   withdraw: {
     title: 'Retirer mes gains',

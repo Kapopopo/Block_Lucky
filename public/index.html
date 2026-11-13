@@ -43,6 +43,9 @@
   <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
   <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></symbol>
   <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5.5c0 4.4 3 8.2 7 9.5 4-1.3 7-5.1 7-9.5V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1.5"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1.5"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1.5"/><path d="M14 14h2.5v2.5H14zM18 18h2.5v2.5H18zM14 20.5h1M20.5 14v1"/></symbol>
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M7 8.5V3.5h10v5"/><rect x="3.5" y="8.5" width="17" height="8" rx="2"/><path d="M7 14h10v6.5H7z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-fox" viewBox="0 0 24 24"><path d="M4 4l5 4h6l5-4-1.5 8L20 17l-8 4-8-4 1.5-5z"/><path d="M9 13.5h.1M15 13.5h.1M10.5 17h3"/></symbol>
 </svg>
 
@@ -66,6 +69,7 @@
     <div class="side-foot">
       <button class="network-pill" data-view="settings" id="networkPill"><span class="dot"></span><span id="networkPillText">Mode démo</span></button>
       <button class="side-button" id="tourButton" data-start-tour><svg class="icon"><use href="#i-help"/></svg>Revoir le tuto</button>
+      <button class="side-button" data-open-privacy><svg class="icon"><use href="#i-shield"/></svg>Données personnelles</button>
     </div>
   </aside>
 
@@ -407,7 +411,7 @@
         </div>
 
         <article class="card admin-principle" style="--i:0">
-          <div><h3>L’admin peut</h3><ul class="check-list"><li>Créer un tirage et choisir ses règles (tickets, durée, limite par joueur)</li><li>Annuler un tirage avant son résultat : chacun est remboursé</li><li>Publier des annonces pour tous les joueurs</li><li>Suivre les statistiques</li></ul></div>
+          <div><h3>L’admin peut</h3><ul class="check-list"><li>Créer un tirage et choisir ses règles (tickets, durée, limite par joueur)</li><li>Annuler un tirage avant son résultat : chacun est remboursé</li><li>Publier des annonces pour tous les joueurs</li><li>Créer des QR codes à afficher dans la ville</li><li>Suivre les statistiques</li></ul></div>
           <div><h3>L’admin ne peut pas</h3><ul class="cross-list"><li>Choisir le gagnant : c’est l’oracle de hasard qui le désigne</li><li>Clôturer les ventes avant l’heure</li><li>Prendre l’argent de la cagnotte</li></ul></div>
         </article>
 
@@ -462,6 +466,35 @@
           <p id="announcementLocked" class="admin-note" hidden></p>
           <div id="adminAnnouncements" class="announcement-list"></div>
         </article>
+
+        <article class="card" id="adminPostersCard">
+          <div class="card-head">
+            <h2>QR codes à imprimer</h2>
+            <button class="btn btn-ghost btn-sm" id="posterPrintAll" hidden><svg class="icon"><use href="#i-printer"/></svg>Tout imprimer</button>
+          </div>
+          <p class="muted small">Une affiche par lieu de la ville : les habitants scannent le QR code avec l’appareil photo de leur téléphone et arrivent directement sur la loterie.</p>
+          <p id="posterLocked" class="admin-note" hidden>Pour créer des QR codes, connecte-toi avec le compte administrateur.</p>
+          <button class="btn btn-primary poster-new" id="posterNew"><svg class="icon"><use href="#i-plus"/></svg>Créer un QR code</button>
+          <form id="posterForm" class="form poster-form" hidden>
+            <div class="poster-form-grid">
+              <div class="form">
+                <label class="field"><span>Lieu de l’affiche</span><input name="place" maxlength="60" required placeholder="Mairie d’EtherBay"></label>
+                <label class="field"><span>Lien ouvert par le QR code</span><input name="url" type="url" maxlength="300" required spellcheck="false"></label>
+                <p id="posterUrlHint" class="poster-hint" hidden></p>
+                <label class="field"><span>Message sur l’affiche <small class="muted">(facultatif)</small></span><input name="message" maxlength="140" placeholder="Tirage ce soir à 20 h, place du Marché"></label>
+              </div>
+              <figure class="poster-preview" aria-label="Aperçu du QR code">
+                <div class="qr-box" id="posterPreviewQr"></div>
+                <figcaption><b id="posterPreviewPlace">Lieu de l’affiche</b><small id="posterPreviewUrl"></small></figcaption>
+              </figure>
+            </div>
+            <div class="dialog-actions">
+              <button type="submit" class="btn btn-primary">Enregistrer le QR code</button>
+              <button type="button" class="btn btn-ghost" id="posterCancel">Annuler</button>
+            </div>
+          </form>
+          <div id="posterList" class="poster-list"></div>
+        </article>
       </section>
     </main>
   </div>
@@ -477,6 +510,9 @@
 </nav>
 
 <div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Affiches QR code : rempli juste avant l'impression, seul élément visible sur papier -->
+<div id="printArea" aria-hidden="true"></div>
 
 <!-- Fenêtres -->
 <dialog id="walletDialog" class="modal">
@@ -504,13 +540,28 @@
       <label class="field"><span>Pseudo</span><input name="pseudo" required minlength="2" maxlength="24" autocomplete="nickname" placeholder="Alice"></label>
       <label class="field"><span>E-mail</span><input name="email" type="email" required autocomplete="email" placeholder="alice@exemple.fr"></label>
       <label class="field"><span>Mot de passe <small class="muted">(8 caractères minimum)</small></span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <p class="form-note">Ton pseudo et ton e-mail restent sur ce serveur et ne servent qu’au jeu. <button type="button" class="link-button" data-open-privacy>Données personnelles</button></p>
       <button type="submit" class="btn btn-primary btn-block">Créer mon compte</button>
     </form>
     <form id="loginForm" class="form" hidden>
       <label class="field"><span>E-mail</span><input name="email" type="email" required autocomplete="email"></label>
       <label class="field"><span>Mot de passe</span><input name="password" type="password" required autocomplete="current-password"></label>
       <button type="submit" class="btn btn-primary btn-block">Se connecter</button>
+      <button type="button" class="link-button form-link" data-account-tab="forgot">Mot de passe oublié ?</button>
     </form>
+    <form id="forgotForm" class="form" hidden>
+      <p class="muted small">Indique l’e-mail de ton compte : tu recevras un lien pour choisir un nouveau mot de passe (valable 30 minutes).</p>
+      <label class="field"><span>E-mail</span><input name="email" type="email" required autocomplete="email"></label>
+      <button type="submit" class="btn btn-primary btn-block">Recevoir le lien</button>
+      <p class="form-note">Prototype : aucun e-mail n’est réellement envoyé, le lien s’affiche dans la console du serveur.</p>
+      <button type="button" class="link-button form-link" data-account-tab="login">Retour à la connexion</button>
+    </form>
+    <form id="resetForm" class="form" hidden>
+      <p class="muted small">Choisis ton nouveau mot de passe. Tu seras connecté juste après.</p>
+      <label class="field"><span>Nouveau mot de passe <small class="muted">(8 caractères minimum)</small></span><input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+      <button type="submit" class="btn btn-primary btn-block">Enregistrer mon nouveau mot de passe</button>
+    </form>
+    <p id="accountInfo" class="form-success" role="status" hidden></p>
     <p id="accountError" class="form-error" role="alert" hidden></p>
   </div>
 
@@ -523,6 +574,16 @@
       <a class="btn btn-ghost" href="#admin" data-view="admin" data-admin-only hidden><svg class="icon"><use href="#i-shield"/></svg>Espace admin</a>
       <button id="logoutButton" class="btn btn-ghost">Se déconnecter</button>
     </div>
+    <div class="account-data">
+      <button id="exportDataButton" class="link-button"><svg class="icon"><use href="#i-download"/></svg>Télécharger mes données</button>
+      <button class="link-button" data-open-privacy>Données personnelles</button>
+      <button id="deleteAccountToggle" class="link-button danger-link">Supprimer mon compte</button>
+    </div>
+    <form id="deleteForm" class="form danger-zone" hidden>
+      <div><b>Supprimer définitivement ton compte ?</b><p class="muted small">Ton pseudo, ton e-mail, ton solde démo et ton historique sont effacés, et ton pseudo disparaît des résultats. C’est irréversible. Les transactions faites sur une blockchain, elles, restent publiques.</p></div>
+      <label class="field"><span>Confirme avec ton mot de passe</span><input name="password" type="password" required autocomplete="current-password"></label>
+      <div class="dialog-actions"><button type="button" class="btn btn-ghost" id="deleteCancel">Annuler</button><button type="submit" class="btn btn-danger">Supprimer mon compte</button></div>
+    </form>
   </div>
 
   <div id="accountWalletProfile" hidden>
@@ -577,6 +638,28 @@
     <h2>Tout est prêt !</h2>
     <div class="dialog-actions"><button id="onboardingFinish" class="btn btn-primary">Aller au tableau de bord</button></div>
   </div>
+</dialog>
+
+<dialog id="privacyDialog" class="modal modal-wide">
+  <button class="dialog-close" data-close aria-label="Fermer"><svg class="icon"><use href="#i-close"/></svg></button>
+  <h2>Données personnelles</h2>
+  <p class="muted small">BlockLucky est un prototype pédagogique de la ville fictive d’EtherBay. Voici ce que le serveur conserve, pourquoi, et comment l’effacer.</p>
+  <dl class="privacy-list">
+    <dt>Sans compte (invité)</dt>
+    <dd>Un cookie de session technique (<code>bl_session</code>), indispensable au fonctionnement : il retient ta partie démo sur ce navigateur. Aucun cookie publicitaire ni outil de mesure d’audience.</dd>
+    <dt>Avec un compte</dt>
+    <dd>Ton pseudo, ton e-mail et une empreinte de ton mot de passe (scrypt : le mot de passe lui-même n’est jamais stocké), ainsi que ton solde démo, tes tickets, tes reçus et tes notifications.</dd>
+    <dt>Connexion avec Ethereum</dt>
+    <dd>Ton adresse publique, vérifiée par une signature. BlockLucky ne voit jamais ta phrase secrète ni ta clé privée.</dd>
+    <dt>À quoi ça sert</dt>
+    <dd>Uniquement à faire fonctionner le jeu : te reconnaître, afficher ton solde et tes résultats. Rien n’est vendu ni transmis.</dd>
+    <dt>Durée</dt>
+    <dd>Jusqu’à la suppression de ton compte. Une session invitée expire avec son cookie.</dd>
+    <dt>Tes droits</dt>
+    <dd>Depuis « Mon compte » : <b>télécharger tes données</b> (fichier JSON) et <b>supprimer ton compte</b>. La suppression efface aussi ton pseudo des résultats publiés.</dd>
+    <dt>Ce qui ne s’efface pas</dt>
+    <dd>En mode blockchain, chaque achat est une transaction publique et définitive, visible de tous sur l’explorateur (Etherscan) : c’est le principe même d’une blockchain. Joue avec un compte MetaMask réservé aux tests.</dd>
+  </dl>
 </dialog>
 
 <dialog id="purchaseDialog" class="modal">

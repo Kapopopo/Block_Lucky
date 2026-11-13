@@ -1,14 +1,43 @@
 // ---------------------------------------------------------------------------
-// Espace administrateur : règles des tirages, création, annulation, annonces, statistiques.
+// Espace administrateur : règles des tirages, création, annulation, annonces, statistiques, QR codes.
 // Principe : l'admin organise, mais ne choisit jamais le gagnant (c'est l'oracle de hasard).
 // ---------------------------------------------------------------------------
-import { $, api, toast, esc, short, pad, fmtEth, fmtEthPrecise, fmtPct, setHTML, empty } from './common.js';
+import { $, api, toast, esc, short, pad, fmtEth, fmtEthPrecise, fmtPct, setHTML, empty, download } from './common.js';
+import { qrSvg, qrPng } from './qr.js';
+
+/** Adresses qu'un téléphone ne peut pas ouvrir (elles désignent l'appareil lui-même). */
+const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/;
+const LAN_HOST = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+/** Adresse lisible sous le QR code, sans « https:// » ni barre finale. */
+const prettyUrl = url => url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+const slug = text => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'affiche';
+const BRAND_MARK = '<svg viewBox="0 0 24 24"><path d="M12 3.5v17M4.6 7.7l14.8 8.6M4.6 16.3l14.8-8.6"/></svg>';
+
+/** Affiche A4 imprimée : lieu, QR code, message de l'admin et les trois étapes pour jouer. */
+function posterHtml(poster, svg) {
+  return `<section class="poster${poster.message ? ' poster-with-message' : ''}">
+    <header class="poster-brand"><span class="poster-mark">${BRAND_MARK}</span><span><b>BlockLucky</b><small>Loterie de fin d’année d’EtherBay</small></span></header>
+    <p class="poster-place">${esc(poster.place)}</p>
+    <h1>Tentez votre chance, scannez-moi&nbsp;!</h1>
+    <div class="poster-qr">${svg}</div>
+    <p class="poster-scan">Ouvrez l’appareil photo de votre téléphone et visez le QR code.</p>
+    ${poster.message ? `<p class="poster-message">${esc(poster.message)}</p>` : ''}
+    <ol class="poster-steps">
+      <li><b>Créez un compte gratuit</b><span>1 ETH fictif offert pour jouer</span></li>
+      <li><b>Choisissez vos tickets</b><span>0,01 ETH fictif le ticket</span></li>
+      <li><b>Suivez le tirage en direct</b><span>Un hasard que chacun peut vérifier</span></li>
+    </ol>
+    <footer><span>${esc(prettyUrl(poster.url))}</span><span>Prototype pédagogique · aucun argent réel</span></footer>
+  </section>`;
+}
 
 export function initAdmin(ctx) {
   let stats = null;
   let oracle = null;
   let lastLoad = 0;
   let cancelArmed = null;
+  let posters = null;
+  const qrCache = new Map(); // lien → QR code SVG des vignettes
 
   const app = ctx.app;
   const isChain = () => app.mode === 'chain';
@@ -19,6 +48,7 @@ export function initAdmin(ctx) {
     lastLoad = Date.now();
     try { stats = app.session?.isAdmin ? await api('/api/admin/stats') : null; } catch { stats = null; }
     try { oracle = isChain() ? await ctx.readOracle() : null; } catch { oracle = null; }
+    try { posters = app.session?.isAdmin ? (await api('/api/admin/posters')).posters : null; } catch { posters = null; }
     render();
   }
 
@@ -123,7 +153,142 @@ export function initAdmin(ctx) {
     setHTML($('adminAnnouncements'), list.length
       ? list.map(a => `<div class="announcement-item"><div><b>${esc(a.title)}</b><p>${esc(a.message)}</p><small>${esc(a.author)} · ${new Date(a.date).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small></div>${canPublish ? `<button class="btn btn-ghost btn-sm" data-delete-announcement="${esc(a.id)}">Supprimer</button>` : ''}</div>`).join('')
       : empty('i-bell', 'Aucune annonce publiée.'));
+
+    renderPosters();
   }
+
+  // ----- QR codes à imprimer -----
+  function renderPosters() {
+    const canEdit = Boolean(app.session?.isAdmin);
+    const editing = !$('posterForm').hidden;
+    const list = canEdit ? posters || [] : [];
+    $('posterLocked').hidden = canEdit;
+    $('posterNew').hidden = !canEdit || editing;
+    $('posterPrintAll').hidden = list.length < 2;
+    const missing = list.filter(p => !qrCache.has(p.url));
+    if (missing.length) {
+      // Les vignettes se calculent une fois, puis la liste se réaffiche avec elles.
+      Promise.all(missing.map(async p => qrCache.set(p.url, await qrSvg(p.url).catch(() => ''))))
+        .then(() => app.view === 'admin' && renderPosters());
+    }
+    setHTML($('posterList'), list.length
+      ? list.map(p => `<div class="poster-item">
+          <div class="qr-box">${qrCache.get(p.url) || ''}</div>
+          <div class="poster-item-text"><b>${esc(p.place)}</b>${p.message ? `<p>${esc(p.message)}</p>` : ''}<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(prettyUrl(p.url))}</a>
+            <small>Créé le ${new Date(p.createdAt).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small></div>
+          <div class="poster-item-actions">
+            <button class="btn btn-primary btn-sm" data-poster-print="${esc(p.id)}"><svg class="icon"><use href="#i-printer"/></svg>Imprimer l’affiche</button>
+            <button class="btn btn-ghost btn-sm" data-poster-png="${esc(p.id)}"><svg class="icon"><use href="#i-download"/></svg>Image PNG</button>
+            <button class="btn btn-ghost btn-sm" data-poster-delete="${esc(p.id)}">Supprimer</button>
+          </div>
+        </div>`).join('')
+      : canEdit && !editing ? empty('i-qr', 'Aucun QR code pour l’instant. Crée-en un par lieu où tu veux poser une affiche.') : '');
+  }
+
+  /** Lien proposé par défaut : l'adresse du site, ou celle du Wi-Fi si le site tourne sur cet ordinateur. */
+  let lanUrls = null;
+  async function defaultUrl() {
+    if (!LOCAL_HOST.test(location.hostname)) return location.origin + '/';
+    lanUrls ??= await api('/api/lan').then(r => r.urls).catch(() => []);
+    return (lanUrls[0] || location.origin) + '/';
+  }
+
+  /** Prévient quand le lien ne s'ouvrira pas (ou pas partout) depuis un téléphone. */
+  function urlHint(value) {
+    let url;
+    try { url = new URL(value); } catch { return value ? 'Adresse incomplète : elle doit commencer par http:// ou https://.' : ''; }
+    if (!['http:', 'https:'].includes(url.protocol)) return 'Le lien doit commencer par http:// ou https://.';
+    if (LOCAL_HOST.test(url.hostname)) return 'Cette adresse ne fonctionne que sur cet ordinateur : un téléphone ne pourra pas l’ouvrir. Mets l’adresse publique du site, ou lance le serveur avec HOST=0.0.0.0 pour l’ouvrir au Wi-Fi.';
+    if (LAN_HOST.test(url.hostname)) return 'Adresse du réseau local : seuls les téléphones connectés au même Wi-Fi que cet ordinateur pourront l’ouvrir.';
+    return '';
+  }
+
+  let previewTimer = null;
+  let previewText = null;
+  function updatePreview() {
+    const form = $('posterForm');
+    const place = form.elements.place.value.trim();
+    const url = form.elements.url.value.trim();
+    const hint = urlHint(url);
+    $('posterUrlHint').hidden = !hint;
+    $('posterUrlHint').textContent = hint;
+    $('posterPreviewPlace').textContent = place || 'Lieu de l’affiche';
+    let valid = false;
+    try { valid = ['http:', 'https:'].includes(new URL(url).protocol); } catch { valid = false; }
+    $('posterPreviewUrl').textContent = valid ? prettyUrl(url) : '';
+    const text = valid ? url : '';
+    if (text === previewText) return;
+    previewText = text;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      const svg = text ? await qrSvg(text).catch(() => '') : '';
+      if (previewText === text) $('posterPreviewQr').innerHTML = svg || '<span class="muted small">Le QR code apparaît ici</span>';
+    }, 150);
+  }
+
+  function closePosterForm() {
+    $('posterForm').hidden = true;
+    renderPosters();
+    $('posterNew').focus();
+  }
+
+  $('posterNew').addEventListener('click', async () => {
+    const form = $('posterForm');
+    form.reset();
+    form.hidden = false;
+    previewText = null;
+    renderPosters();
+    form.elements.url.value = await defaultUrl();
+    updatePreview();
+    form.elements.place.focus();
+  });
+  $('posterCancel').addEventListener('click', closePosterForm);
+  $('posterForm').addEventListener('input', updatePreview);
+
+  $('posterForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = { place: form.elements.place.value.trim(), url: form.elements.url.value.trim(), message: form.elements.message.value.trim() };
+    try {
+      const { poster } = await api('/api/admin/posters', values);
+      posters = [poster, ...(posters || [])];
+      toast('QR code enregistré : tu peux l’imprimer quand tu veux.', 'success');
+      closePosterForm();
+    } catch (error) { toast(error.message, 'error'); }
+  });
+
+  /** Imprime une ou plusieurs affiches, une par page A4. */
+  async function printPosters(list) {
+    try {
+      const svgs = await Promise.all(list.map(p => qrSvg(p.url, 0)));
+      const area = $('printArea');
+      area.innerHTML = list.map((p, i) => posterHtml(p, svgs[i])).join('');
+      document.body.classList.add('printing-posters');
+      const done = () => { document.body.classList.remove('printing-posters'); area.innerHTML = ''; };
+      window.addEventListener('afterprint', done, { once: true });
+      window.print();
+    } catch (error) { toast('Impossible de préparer l’affiche : ' + error.message, 'error'); }
+  }
+
+  $('posterPrintAll').addEventListener('click', () => printPosters(posters || []));
+
+  $('posterList').addEventListener('click', async event => {
+    const button = event.target.closest('[data-poster-print], [data-poster-png], [data-poster-delete]');
+    const id = button && (button.dataset.posterPrint || button.dataset.posterPng || button.dataset.posterDelete);
+    const poster = (posters || []).find(p => p.id === id);
+    if (!poster) return;
+    if (button.dataset.posterPrint) return printPosters([poster]);
+    if (button.dataset.posterPng) {
+      const png = await qrPng({ text: poster.url, title: poster.place, caption: prettyUrl(poster.url) });
+      return download(`qr-${slug(poster.place)}.png`, png, 'image/png');
+    }
+    try {
+      await api('/api/admin/posters/' + encodeURIComponent(poster.id), undefined, 'DELETE');
+      posters = posters.filter(p => p.id !== poster.id);
+      toast('QR code supprimé. Les affiches déjà imprimées mènent toujours au site.', 'success');
+      renderPosters();
+    } catch (error) { toast(error.message, 'error'); }
+  });
 
   // ----- Actions -----
   $('adminDrawForm').addEventListener('input', event => { event.currentTarget.dataset.dirty = '1'; });

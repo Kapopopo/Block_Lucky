@@ -990,3 +990,83 @@ input, textarea { caret-color: var(--accent); }
 /* Redirection vers le mode blockchain : le bouton des Réglages est mis en évidence */
 .mode-option.spotlight { animation: mode-spotlight 1.1s var(--ease) 2; }
 @keyframes mode-spotlight { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 40% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 35%, transparent); border-color: var(--accent); } }
+
+/* ---------- Données personnelles et compte ---------- */
+.form-note { font-size: 12px; color: var(--muted); }
+.form-link { align-self: center; }
+.form-success { padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--text-2); font-size: 13px; margin-top: 12px; }
+.account-data { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px; }
+.account-data .link-button { display: inline-flex; align-items: center; gap: 6px; }
+.account-data .icon { width: 15px; height: 15px; }
+.danger-link { color: var(--danger); }
+#deleteForm { flex-direction: column; align-items: stretch; }
+#deleteForm .dialog-actions { margin-top: 0; }
+.privacy-list { display: grid; grid-template-columns: 190px 1fr; gap: 12px 18px; margin-top: 16px; font-size: 14px; }
+.privacy-list dt { font-weight: 700; }
+.privacy-list dd { margin: 0; color: var(--text-2); }
+@media (max-width: 640px) { .privacy-list { grid-template-columns: 1fr; gap: 4px; } .privacy-list dd { margin-bottom: 10px; } }
+
+/* ---------- QR codes à imprimer (Espace admin) ---------- */
+#adminPostersCard { margin-top: 20px; }
+#adminPostersCard > .muted { margin: -8px 0 16px; max-width: 70ch; }
+.poster-new { align-self: flex-start; }
+.poster-form { padding: 18px; border-radius: 16px; background: var(--panel-2); border: 1px solid var(--line); }
+.poster-form .dialog-actions { margin-top: 4px; }
+.poster-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 20px; align-items: start; }
+.poster-hint { font-size: 13px; color: var(--text-2); padding: 10px 12px; border-radius: 12px; background: var(--gold-soft); margin-top: -6px; }
+.poster-preview { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.poster-preview .qr-box { width: 180px; aspect-ratio: 1; display: grid; place-items: center; padding: 8px; border-radius: 14px; background: #fff; border: 1px solid var(--line); }
+.poster-preview figcaption { display: flex; flex-direction: column; gap: 2px; max-width: 200px; overflow-wrap: anywhere; }
+.poster-preview figcaption small { font-size: 12px; color: var(--muted); }
+.qr-box svg { display: block; width: 100%; height: auto; } /* fond blanc : lisible par l'appareil photo, même en thème sombre */
+.poster-list { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.poster-list:empty { display: none; }
+.poster-item { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 12px 14px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); }
+.poster-item .qr-box { width: 76px; aspect-ratio: 1; padding: 4px; border-radius: 10px; background: #fff; border: 1px solid var(--line); }
+.poster-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.poster-item-text p { font-size: 14px; color: var(--text-2); }
+.poster-item-text a { font-size: 13px; color: var(--accent); overflow-wrap: anywhere; }
+.poster-item-text small { font-size: 12px; color: var(--muted); }
+.poster-item-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+@media (max-width: 760px) {
+  .poster-form-grid { grid-template-columns: 1fr; }
+  .poster-preview { order: -1; }
+  .poster-item { grid-template-columns: 64px minmax(0, 1fr); }
+  .poster-item .qr-box { width: 64px; }
+  .poster-item-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* Affiche A4 : n'existe que pendant l'impression */
+#printArea { display: none; }
+@media print {
+  @page { size: A4 portrait; margin: 12mm; }
+  body.printing-posters { background: #fff !important; }
+  body.printing-posters > *:not(#printArea) { display: none !important; }
+  body.printing-posters #printArea { display: block; }
+}
+.poster {
+  height: 270mm; overflow: hidden; display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 14mm 12mm 10mm; border: 1.2mm solid #047857; border-radius: 6mm; color: #141817; background: #fff;
+  font-family: 'Manrope', system-ui, sans-serif; break-after: page; break-inside: avoid;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.poster:last-child { break-after: auto; }
+.poster-brand { display: flex; align-items: center; gap: 4mm; text-align: left; }
+.poster-mark { width: 14mm; height: 14mm; border-radius: 4mm; display: grid; place-items: center; background: linear-gradient(140deg, #6ee7b7, #10b981 45%, #047857); }
+.poster-mark svg { width: 8mm; height: 8mm; fill: none; stroke: #022c22; stroke-width: 2.6; stroke-linecap: round; }
+.poster-brand b { display: block; font-family: 'Space Grotesk', sans-serif; font-size: 22pt; letter-spacing: -.03em; line-height: 1; }
+.poster-brand small { font-size: 11pt; color: #3a413e; font-weight: 600; }
+.poster-place { margin-top: 7mm; padding: 1.6mm 5mm; border-radius: 99px; background: #e6f3ed; color: #065f46; font-weight: 700; font-size: 13pt; }
+.poster h1 { margin-top: 5mm; font-family: 'Space Grotesk', sans-serif; font-size: 34pt; line-height: 1.05; letter-spacing: -.03em; max-width: 160mm; }
+.poster-qr { width: 100mm; height: 100mm; margin-top: 7mm; padding: 5mm; border: .4mm solid #cbd0cd; border-radius: 5mm; background: #fff; }
+.poster-qr svg { display: block; width: 100%; height: 100%; }
+.poster-with-message .poster-qr { width: 80mm; height: 80mm; } /* place pour le message, sans déborder sur une 2e page */
+.poster, .poster * { box-sizing: border-box; }
+.poster-scan { margin-top: 4mm; font-size: 12pt; color: #3a413e; }
+.poster-message { margin-top: 5mm; padding: 3mm 6mm; border-radius: 3mm; background: #fdf3e1; color: #7c3a06; font-weight: 700; font-size: 14pt; max-width: 160mm; margin-bottom: 4mm; }
+.poster-steps { list-style: none; counter-reset: step; display: grid; grid-template-columns: repeat(3, 1fr); gap: 5mm; margin-top: auto; width: 100%; padding: 0; }
+.poster-steps li { counter-increment: step; display: flex; flex-direction: column; gap: 1mm; padding: 4mm 3mm; border-radius: 3mm; background: #f4f5f4; font-size: 10.5pt; color: #3a413e; }
+.poster-steps li::before { content: counter(step); align-self: center; width: 8mm; height: 8mm; line-height: 8mm; border-radius: 50%; background: #047857; color: #fff; font-weight: 700; margin-bottom: 1mm; }
+.poster-steps b { color: #141817; font-size: 11.5pt; }
+.poster footer { display: flex; justify-content: space-between; gap: 6mm; width: 100%; margin-top: 6mm; padding-top: 3mm; border-top: .3mm solid #e2e5e3; font-size: 9.5pt; color: #5f6763; overflow-wrap: anywhere; text-align: left; }
+.poster footer span:first-child { font-weight: 700; color: #141817; }

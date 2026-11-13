@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import ganache from 'ganache';
-import { BrowserProvider, ContractFactory, Contract, parseEther, ZeroHash } from 'ethers';
+import { BrowserProvider, ContractFactory, Contract, parseEther, ZeroHash, AbiCoder } from 'ethers';
 import { compile } from '../scripts/compile.js';
 
 const compiled = compile();
@@ -111,17 +111,23 @@ test('contrat : après la date limite, n’importe qui demande le tirage', async
   assert.equal(await lottery.status(), Status.Drawing);
 });
 
-test('contrat : l’admin annule, chacun est remboursé une seule fois', async t => {
-  const { lottery, alice, bob, as } = await setup(t, { capacity: 10, perPlayer: 5 });
+test('contrat : l’admin annule, chacun est remboursé une seule fois, en une seule transaction', async t => {
+  const { provider, lottery, alice, bob, as } = await setup(t, { capacity: 10, perPlayer: 5 });
   await mined(() => as(alice).buyTickets(2, { value: parseEther('.02') }));
   await rejectsTx(() => as(bob).cancel(), 'Not allowed');
   await mined(() => lottery.cancel()); // lottery est connecté au propriétaire
   assert.equal(await lottery.status(), Status.Cancelled);
   await rejectsTx(() => as(alice).buyTickets(1, { value: parseEther('.01') }), 'Sales closed');
-  await mined(() => as(alice).refund());
+  const player = await alice.getAddress();
+  const receipt = await mined(() => as(alice).refund());
+  // La mise revient directement sur le portefeuille : seuls les frais de la transaction sont perdus.
+  // (Soldes lus à des blocs précis : ethers garde 250 ms en cache deux lectures identiques.)
+  const before = await provider.getBalance(player, receipt.blockNumber - 1);
+  const after = await provider.getBalance(player, receipt.blockNumber);
+  assert.equal(after, before + parseEther('.02') - receipt.gasUsed * receipt.gasPrice);
   await rejectsTx(() => as(alice).refund(), 'Nothing to refund');
-  assert.equal(await lottery.credits(await alice.getAddress()), parseEther('.02'));
-  await mined(() => as(alice).withdraw());
+  assert.equal(await lottery.credits(await alice.getAddress()), 0n);
+  assert.equal(await provider.getBalance(await lottery.getAddress()), 0n);
 });
 
 test('contrat : oracle muet pendant 1 h → n’importe qui peut annuler ; réponse tardive ignorée', async t => {
@@ -162,4 +168,42 @@ test('usine : la réserve de l’oracle peut être alimentée en ETH', async t =
   const [, native] = await factory.oracleBalance();
   assert.equal(native, parseEther('0.5'));
   await rejectsTx(() => factory.fundOracle({ value: 0 }), 'Nothing sent');
+});
+
+test('usine : chaque tirage est un clone léger, configuré une seule fois, environ 30 fois moins cher à créer', async t => {
+  const { provider, factory, lottery, alice, as, fulfill } = await setup(t, { capacity: 1, perPlayer: 1 });
+  assert.equal((await provider.getCode(await lottery.getAddress())).length, 2 + 45 * 2); // proxy EIP-1167 : 45 octets
+  const someone = await alice.getAddress();
+  await rejectsTx(() => lottery.initialize(someone, 9, 60, 10, 5), 'Already initialized'); // impossible de reconfigurer un tirage
+  const model = new Contract(await factory.implementation(), compiled.BlockLucky.abi, alice);
+  await rejectsTx(() => model.initialize(someone, 1, 60, 10, 5), 'Already initialized'); // le modèle est verrouillé
+  await mined(() => as(alice).buyTickets(1, { value: parseEther('.01') }));
+  await fulfill(3n);
+  const receipt = await mined(() => factory.createLottery(3600, 10, 5));
+  assert.ok(receipt.gasUsed < 400000n, `création d'un tirage : ${receipt.gasUsed} gas`);
+});
+
+test('usine : clôture automatique à l’échéance, puis annulation si l’oracle reste muet (Chainlink Automation)', async t => {
+  const { rpc, provider, factory, lottery, alice, bob, as } = await setup(t, { capacity: 10, perPlayer: 5 });
+  const due = async () => {
+    const [needed, data] = await factory.checkUpkeep('0x');
+    return needed ? Number(AbiCoder.defaultAbiCoder().decode(['uint8'], data)[0]) : 0;
+  };
+  const later = async seconds => { await rpc.request({ method: 'evm_increaseTime', params: [seconds] }); await rpc.request({ method: 'evm_mine', params: [] }); };
+  await mined(() => as(alice).buyTickets(2, { value: parseEther('.02') }));
+  assert.equal(await due(), 0); // ventes encore ouvertes
+  await rejectsTx(() => factory.connect(bob).performUpkeep('0x'), 'Nothing to do');
+
+  await later(3601);
+  assert.equal(await due(), 1); // échéance passée avec des tickets : demander le hasard
+  await mined(() => factory.connect(bob).performUpkeep('0x', { gasLimit: 600000 })); // n'importe qui peut l'exécuter
+  assert.equal(await lottery.status(), Status.Drawing);
+  assert.equal(await due(), 0);
+
+  await later(3601);
+  assert.equal(await due(), 2); // oracle muet depuis 1 h : annulation
+  await mined(() => factory.connect(bob).performUpkeep('0x', { gasLimit: 300000 }));
+  assert.equal(await lottery.status(), Status.Cancelled);
+  await mined(() => as(alice).refund());
+  assert.equal(await provider.getBalance(await lottery.getAddress()), 0n);
 });

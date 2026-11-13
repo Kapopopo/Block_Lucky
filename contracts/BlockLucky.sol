@@ -8,7 +8,8 @@ interface IBlockLuckyFactory {
 }
 
 /// @title BlockLucky — un tirage de la loterie pédagogique
-/// @notice Créé par BlockLuckyFactory. Le hasard vient de l'oracle Chainlink VRF :
+/// @notice Créé par BlockLuckyFactory sous forme de copie légère (« clone » EIP-1167) : le code est déployé
+/// une seule fois (le modèle), chaque tirage n'a que ses propres données, ce qui divise le coût de création. Le hasard vient de l'oracle Chainlink VRF :
 /// un nombre aléatoire accompagné d'une preuve que personne (ni l'admin, ni un validateur) n'a pu le choisir.
 /// Prototype de test, sans audit : ne jamais l'utiliser avec de l'argent réel.
 contract BlockLucky {
@@ -28,11 +29,13 @@ contract BlockLucky {
     // Configuration choisie par l'admin à la création
     // ---------------------------------------------------------------------
 
-    IBlockLuckyFactory public immutable factory;
-    uint256 public immutable round;               // numéro du tirage (1, 2, 3…)
-    uint256 public immutable deadline;            // fin des ventes (timestamp Unix)
-    uint256 public immutable maxTickets;          // tickets maximum pour ce tirage
-    uint256 public immutable maxTicketsPerPlayer; // limite par adresse, pour l'équité
+    // Variables (et non « immutable ») : un clone ne passe pas par le constructeur, il est configuré par initialize().
+    IBlockLuckyFactory public factory;
+    uint256 public round;               // numéro du tirage (1, 2, 3…)
+    uint256 public deadline;            // fin des ventes (timestamp Unix)
+    uint256 public maxTickets;          // tickets maximum pour ce tirage
+    uint256 public maxTicketsPerPlayer; // limite par adresse, pour l'équité
+    bool private initialized;
 
     // ---------------------------------------------------------------------
     // État
@@ -41,7 +44,7 @@ contract BlockLucky {
     Status public status;
     address[] public tickets;                     // une case par ticket : l'adresse de son propriétaire
     mapping(address => uint256) public ticketCount;
-    mapping(address => uint256) public credits;   // montants à retirer (gain ou remboursement)
+    mapping(address => uint256) public credits;   // gain à retirer
     uint256 public requestId;                     // identifiant de la requête envoyée à l'oracle
     uint256 public drawRequestedAt;
     uint256 public randomWord;                    // nombre aléatoire fourni par l'oracle
@@ -64,7 +67,15 @@ contract BlockLucky {
         _;
     }
 
-    constructor(address factory_, uint256 round_, uint256 duration, uint256 capacity, uint256 perPlayer) {
+    /// Le modèle lui-même est verrouillé dès son déploiement : personne ne peut s'en servir comme tirage.
+    constructor() {
+        initialized = true;
+    }
+
+    /// Configuration d'un clone, une seule fois, par l'usine qui vient de le créer (dans la même transaction).
+    function initialize(address factory_, uint256 round_, uint256 duration, uint256 capacity, uint256 perPlayer) external {
+        require(!initialized, "Already initialized");
+        initialized = true;
         require(duration > 0 && capacity > 0 && capacity <= 10000, "Invalid configuration");
         require(perPlayer > 0 && perPlayer <= capacity, "Invalid player limit");
         factory = IBlockLuckyFactory(factory_);
@@ -160,16 +171,19 @@ contract BlockLucky {
         emit LotteryCancelled(msg.sender);
     }
 
+    /// Remboursement en une seule transaction : la mise revient directement sur le portefeuille du joueur.
+    /// Le compteur est remis à zéro AVANT l'envoi (checks-effects-interactions) : pas de double remboursement.
     function refund() external {
         require(status == Status.Cancelled, "Refund unavailable");
         uint256 amount = ticketCount[msg.sender] * TICKET_PRICE;
         require(amount > 0, "Nothing to refund");
-        ticketCount[msg.sender] = 0; // empêche un double remboursement
-        credits[msg.sender] += amount;
+        ticketCount[msg.sender] = 0;
+        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        require(ok, "Transfer failed");
         emit Refunded(msg.sender, amount);
     }
 
-    /// Retrait des crédits (« pull payment ») : le solde est remis à zéro AVANT l'envoi
+    /// Retrait du gain (« pull payment ») : le solde est remis à zéro AVANT l'envoi
     /// (checks-effects-interactions), ce qui bloque la réentrance et le double retrait.
     function withdraw() external {
         uint256 amount = credits[msg.sender];

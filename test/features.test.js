@@ -208,6 +208,29 @@ test('admin : annonces publiées puis supprimées', async t => {
   assert.equal(session.announcements.length, 0);
 });
 
+test('admin : QR codes à imprimer enregistrés, conservés à la remise à zéro, puis supprimés', async t => {
+  const { admin, player } = await adminAndPlayer(t);
+  assert.equal((await player('/api/admin/posters')).status, 403);
+  assert.equal((await player('/api/admin/posters', { place: 'Mairie', url: 'https://exemple.fr/' })).status, 403);
+  assert.equal((await admin('/api/admin/posters', { place: '', url: 'https://exemple.fr/' })).status, 400);
+  assert.equal((await admin('/api/admin/posters', { place: 'Mairie', url: 'javascript:alert(1)' })).status, 400);
+  assert.equal((await admin('/api/admin/posters', { place: 'Mairie', url: 'pas une adresse' })).status, 400);
+  assert.equal((await admin('/api/admin/posters', { place: 'Mairie', url: 'https://exemple.fr/', message: 'x'.repeat(141) })).status, 400);
+
+  const { status, data } = await admin('/api/admin/posters', { place: 'Mairie d’EtherBay', url: 'https://exemple.fr', message: 'Tirage à 20 h' });
+  assert.equal(status, 201);
+  assert.equal(data.poster.url, 'https://exemple.fr/');
+  await admin('/api/admin/posters', { place: 'Médiathèque', url: 'http://192.168.1.20:3000/' });
+  assert.equal((await admin('/api/admin/reset', {})).status, 200);
+  let list = (await admin('/api/admin/posters')).data.posters;
+  assert.deepEqual(list.map(p => p.place), ['Médiathèque', 'Mairie d’EtherBay']);
+
+  assert.equal((await admin('/api/admin/posters/' + data.poster.id, undefined, 'DELETE')).status, 200);
+  assert.equal((await admin('/api/admin/posters/' + data.poster.id, undefined, 'DELETE')).status, 404);
+  list = (await admin('/api/admin/posters')).data.posters;
+  assert.deepEqual(list.map(p => p.place), ['Médiathèque']);
+});
+
 // --- Connexion avec Ethereum (SIWE) et robinet ---
 
 test('connexion avec Ethereum : signature vérifiée, usage unique', async t => {

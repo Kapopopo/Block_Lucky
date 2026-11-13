@@ -5,7 +5,7 @@
 //   • Robinet d'ETH de test, temps réel (SSE) et, en local, oracle de hasard simulé.
 // Les montants de la démo sont stockés en unités entières de 0,01 ETH pour éviter les erreurs d'arrondi.
 import express from 'express';
-import { randomBytes, randomInt } from 'node:crypto';
+import { randomBytes, randomInt, createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import { createSiweMessage, verifySiwe } from './server/siwe.js';
 import { createHub } from './server/realtime.js';
 import { createChainService } from './server/chain.js';
 import { resetDemoData } from './server/reset.js';
+import { rateLimit, contentSecurityPolicy } from './server/security.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,10 +31,18 @@ const MAX_NOTIFICATIONS = 50;
 const MAX_ACTIVITY = 50;
 const MAX_HISTORY = 30;
 const MAX_ANNOUNCEMENTS = 20;
+const MAX_POSTERS = 50;
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,24}$/;
 const PSEUDO_PATTERN = /^[\p{L}\p{N} ._-]{2,24}$/u;
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const RESET_TOKEN_MS = 30 * 60 * 1000; // validité d'un lien « mot de passe oublié »
+const hashToken = token => createHash('sha256').update(token).digest('hex'); // le serveur ne garde que l'empreinte
+
+/** Envoi d'e-mail simulé : le prototype n'a pas de service d'e-mail, le message s'affiche dans la console du serveur. */
+function consoleMail({ to, subject, text }) {
+  console.log(`\n[E-mail simulé] À : ${to}\nObjet : ${subject}\n${text}\n`);
+}
 const SIWE_TTL_MS = 10 * 60 * 1000;
 
 /** Convertit des unités entières (centièmes) en ETH. */
@@ -67,6 +76,7 @@ export function createApp({
   env = process.env,
   watchChain = false,  // surveillance de la blockchain (désactivée dans les tests)
   tickMs = 1000,       // fréquence de vérification de l'échéance du tirage démo
+  sendMail = consoleMail, // envoi des e-mails (lien de réinitialisation du mot de passe)
 } = {}) {
   // ---------------------------------------------------------------------
   // Stockage
@@ -80,7 +90,9 @@ export function createApp({
   state.rules ??= { capacity: state.settings.capacity, maxPerPlayer: state.settings.maxPerPlayer };
   state.accounts ??= {};
   state.announcements ??= [];
+  state.posters ??= []; // QR codes à imprimer (Espace admin) : lieu, lien, message
   state.faucet ??= { claims: {}, day: '', spent: 0 };
+  state.resets ??= {}; // liens « mot de passe oublié » en cours : empreinte du jeton → { email, expires }
   // Ancienne version : les invités recevaient 1 ETH fictif et pouvaient jouer.
   // Désormais, sans compte, le portefeuille démo est entièrement vide : solde, opérations, tickets, reçus, notifications.
   // Une seule fois : ces invités reçoivent aussi une nouvelle adresse démo, sinon les anciens résultats
@@ -230,11 +242,29 @@ export function createApp({
     return server;
   };
 
+  // En-têtes de sécurité. CSP=off dans .env désactive la politique de sécurité du contenu (dépannage d'une extension).
+  const csp = env.CSP === 'off' ? null : contentSecurityPolicy(readFileSync(path.join(root, 'public/index.html'), 'utf8'));
   app.use((req, res, next) => {
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('Referrer-Policy', 'same-origin');
+    res.set('X-Frame-Options', 'DENY');
+    if (csp) res.set('Content-Security-Policy', csp);
     next();
   });
+
+  // Limites de requêtes par adresse IP : assez larges pour une classe derrière une même connexion,
+  // assez serrées pour arrêter un robot qui crée des comptes ou essaie des mots de passe en boucle.
+  const minutes = n => n * 60 * 1000;
+  const limits = {
+    register: rateLimit({ windowMs: minutes(15), max: 30, message: 'Trop de comptes créés depuis cette connexion. Réessaie dans quelques minutes.' }),
+    login: rateLimit({ windowMs: minutes(15), max: 40, message: 'Trop de tentatives de connexion depuis cette connexion. Réessaie dans quelques minutes.' }),
+    forgot: rateLimit({ windowMs: minutes(15), max: 5, message: 'Trop de demandes de réinitialisation. Réessaie dans quelques minutes.' }),
+    reset: rateLimit({ windowMs: minutes(15), max: 10, message: 'Trop d’essais. Réessaie dans quelques minutes.' }),
+    account: rateLimit({ windowMs: minutes(15), max: 10, message: 'Trop de demandes. Réessaie dans quelques minutes.' }),
+    wallet: rateLimit({ windowMs: minutes(5), max: 30, message: 'Trop de signatures demandées. Réessaie dans quelques minutes.' }),
+    tickets: rateLimit({ windowMs: minutes(1), max: 60, message: 'Trop d’achats en peu de temps. Patiente une minute.' }),
+    faucet: rateLimit({ windowMs: minutes(60), max: 10, message: 'Trop de demandes au robinet. Réessaie plus tard.' }),
+  };
 
   // Toutes les routes /api : anti-CSRF, session, puis tirage éventuel.
   app.use('/api', (req, res, next) => {
@@ -300,7 +330,7 @@ export function createApp({
   });
 
   /** Achat de tickets. */
-  app.post('/api/tickets', (req, res) => {
+  app.post('/api/tickets', limits.tickets, (req, res) => {
     const { quantity, requestId, round } = req.body;
     const me = req.me;
 
@@ -392,11 +422,12 @@ export function createApp({
       isAdmin: isAdmin(me),
       announcements: state.announcements.slice(0, 5),
       faucet: { enabled: faucet.enabled, amount: faucet.amount, network: faucet.network, claimed: Boolean(me.wallet && state.faucet.claims[faucetKey(me.wallet)]) },
+      autoClose: chain.autoCloseEnabled(), // le serveur clôture les tirages blockchain à l'échéance
     });
   });
 
   /** Création de compte : la session invitée devient celle du compte et reçoit 1 ETH fictif de bienvenue. */
-  app.post('/api/account/register', (req, res) => {
+  app.post('/api/account/register', limits.register, (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const pseudo = String(req.body.pseudo || '').trim();
     const password = String(req.body.password || '');
@@ -426,7 +457,7 @@ export function createApp({
   });
 
   const loginFailures = new Map();
-  app.post('/api/account/login', (req, res) => {
+  app.post('/api/account/login', limits.login, (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const failures = loginFailures.get(email);
@@ -449,8 +480,91 @@ export function createApp({
     res.json({ ok: true });
   });
 
+  /**
+   * Mot de passe oublié : un lien à usage unique, valable 30 minutes, est « envoyé » par e-mail.
+   * La réponse est la même que le compte existe ou non : impossible de deviner quelles adresses sont inscrites.
+   */
+  app.post('/api/account/forgot', limits.forgot, (req, res) => {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!EMAIL_PATTERN.test(email)) return res.status(400).json({ error: 'Adresse e-mail invalide.' });
+    const account = state.accounts[email];
+    if (account) {
+      for (const [key, reset] of Object.entries(state.resets)) if (reset.email === email || reset.expires < Date.now()) delete state.resets[key];
+      const token = randomBytes(24).toString('hex');
+      state.resets[hashToken(token)] = { email, expires: Date.now() + RESET_TOKEN_MS };
+      save();
+      const link = `${req.protocol}://${req.get('host')}/#reset=${token}`;
+      sendMail({
+        to: email,
+        subject: 'BlockLucky : choisir un nouveau mot de passe',
+        text: `Bonjour ${account.pseudo},\nPour choisir un nouveau mot de passe, ouvre ce lien (valable 30 minutes, une seule fois) :\n${link}\nSi tu n'as rien demandé, ignore ce message : ton mot de passe ne change pas.`,
+        link,
+      });
+    }
+    res.json({ ok: true, message: 'Si un compte existe avec cette adresse, un lien pour choisir un nouveau mot de passe vient d’être envoyé.' });
+  });
+
+  /** Nouveau mot de passe à partir du lien reçu. Le lien ne sert qu'une fois ; on est ensuite connecté. */
+  app.post('/api/account/reset', limits.reset, (req, res) => {
+    const token = String(req.body.token || '');
+    const password = String(req.body.password || '');
+    const key = /^[a-f0-9]{48}$/.test(token) ? hashToken(token) : null;
+    const reset = key && state.resets[key];
+    if (!reset || reset.expires < Date.now()) return res.status(400).json({ error: 'Ce lien n’est plus valable. Refais une demande « Mot de passe oublié ».' });
+    if (password.length < 8 || password.length > 128) return res.status(400).json({ error: 'Le mot de passe doit faire au moins 8 caractères.' });
+    const account = state.accounts[reset.email];
+    delete state.resets[key];
+    if (!account) return res.status(400).json({ error: 'Ce compte n’existe plus.' });
+    account.password = hashPassword(password);
+    loginFailures.delete(reset.email);
+    if (!state.sessions[account.playerId]) state.sessions[account.playerId] = { address: '0x' + randomBytes(20).toString('hex'), balance: STARTING_BALANCE, account: reset.email, welcomeCredited: true };
+    save();
+    setSessionCookie(res, req, account.playerId);
+    res.json({ account: { email: reset.email, pseudo: account.pseudo, role: account.role } });
+  });
+
+  /** Droit d'accès (RGPD) : toutes les données que le serveur garde sur le compte, dans un fichier JSON. */
+  app.get('/api/account/export', (req, res) => {
+    const email = req.me.account;
+    if (!email || !state.accounts[email]) return res.status(401).json({ error: 'Connecte-toi pour télécharger tes données.' });
+    const { pseudo, role, createdAt } = state.accounts[email];
+    const { address, balance, wallet, transactions = [], participations = [], receipts = [], notifications = [] } = req.me;
+    res.set('Content-Disposition', 'attachment; filename="blocklucky-mes-donnees.json"');
+    res.json({
+      exportedAt: new Date().toISOString(),
+      account: { pseudo, email, role, createdAt: new Date(createdAt).toISOString(), password: 'non communiqué (seule une empreinte scrypt est conservée)' },
+      demoWallet: { address, balance: toEth(balance), verifiedEthereumAddress: wallet || null },
+      transactions, participations, receipts, notifications,
+    });
+  });
+
+  /**
+   * Droit à l'effacement (RGPD) : le compte et ses données démo sont supprimés, le pseudo disparaît des résultats.
+   * Refusé s'il reste des tickets dans le tirage en cours (le gagnant doit pouvoir être crédité).
+   */
+  app.post('/api/account/delete', limits.account, (req, res) => {
+    const email = req.me.account;
+    const account = email && state.accounts[email];
+    if (!account) return res.status(401).json({ error: 'Connecte-toi pour supprimer ton compte.' });
+    if (!verifyPassword(String(req.body.password || ''), account.password)) return res.status(401).json({ error: 'Mot de passe incorrect.' });
+    if (state.tickets.includes(req.player)) {
+      return res.status(409).json({ error: 'Tu as des tickets dans le tirage en cours : attends son résultat avant de supprimer ton compte.' });
+    }
+    const address = req.me.address;
+    for (const entry of [...state.history, ...state.activity]) {
+      if (entry.winner === address) entry.winnerPseudo = null;
+      if (entry.address === address) entry.pseudo = null;
+    }
+    for (const [key, reset] of Object.entries(state.resets)) if (reset.email === email) delete state.resets[key];
+    delete state.accounts[email];
+    delete state.sessions[req.player];
+    createSession(res, req); // on repart en invité, avec un portefeuille vide
+    hub.broadcast('update', { reason: 'account-deleted' });
+    res.json({ ok: true });
+  });
+
   /** Connexion avec Ethereum, étape 1 : le serveur prépare le message à signer. */
-  app.post('/api/wallet/challenge', (req, res) => {
+  app.post('/api/wallet/challenge', limits.wallet, (req, res) => {
     const { address, chainId } = req.body;
     if (typeof address !== 'string' || !isAddress(address)) return res.status(400).json({ error: 'Adresse Ethereum invalide.' });
     if (!isInteger(chainId, 1, 2 ** 53)) return res.status(400).json({ error: 'Réseau invalide.' });
@@ -461,7 +575,7 @@ export function createApp({
   });
 
   /** Étape 2 : on vérifie la signature. Elle prouve la possession de l'adresse, sans mot de passe. */
-  app.post('/api/wallet/verify', (req, res) => {
+  app.post('/api/wallet/verify', limits.wallet, (req, res) => {
     const challenge = req.me.siwe;
     if (!challenge || challenge.expires < Date.now()) return res.status(400).json({ error: 'Demande de connexion expirée. Recommence.' });
     if (typeof req.body.signature !== 'string' || !verifySiwe(challenge.message, req.body.signature, challenge.address)) {
@@ -481,7 +595,7 @@ export function createApp({
 
   /** Robinet : quelques ETH de test, une seule fois par adresse, pour pouvoir jouer tout de suite. */
   const faucetPending = new Set();
-  app.post('/api/faucet', async (req, res) => {
+  app.post('/api/faucet', limits.faucet, async (req, res) => {
     const settings = chain.faucetSettings();
     if (!settings.network) return res.status(409).json({ error: 'Aucun contrat déployé : le robinet est inactif.' });
     if (!settings.enabled) return res.status(503).json({ error: 'Robinet non configuré sur ce serveur (clé du compte robinet manquante).' });
@@ -578,6 +692,34 @@ export function createApp({
     save();
     hub.broadcast('announcement', { id: announcement.id });
     res.status(201).json({ announcement });
+  });
+
+  // ----- QR codes à imprimer : affiches pour les lieux de la ville -----
+  app.get('/api/admin/posters', requireAdmin, (req, res) => res.json({ posters: state.posters }));
+
+  app.post('/api/admin/posters', requireAdmin, (req, res) => {
+    const place = String(req.body.place || '').trim();
+    const message = String(req.body.message || '').trim();
+    const link = String(req.body.url || '').trim();
+    if (place.length < 1 || place.length > 60) return res.status(400).json({ error: 'Le lieu doit faire entre 1 et 60 caractères.' });
+    if (message.length > 140) return res.status(400).json({ error: 'Le message ne doit pas dépasser 140 caractères.' });
+    let url;
+    try { url = new URL(link); } catch { url = null; }
+    if (!url || !['http:', 'https:'].includes(url.protocol) || link.length > 300) {
+      return res.status(400).json({ error: 'Le lien doit être une adresse web complète (http:// ou https://).' });
+    }
+    const poster = { id: newId(), place, message, url: url.href, createdAt: Date.now() };
+    state.posters = prepend(poster, state.posters, MAX_POSTERS);
+    save();
+    res.status(201).json({ poster });
+  });
+
+  app.delete('/api/admin/posters/:id', requireAdmin, (req, res) => {
+    const before = state.posters.length;
+    state.posters = state.posters.filter(p => p.id !== req.params.id);
+    if (state.posters.length === before) return res.status(404).json({ error: 'QR code introuvable.' });
+    save();
+    res.json({ ok: true });
   });
 
   app.delete('/api/admin/announcements/:id', requireAdmin, (req, res) => {

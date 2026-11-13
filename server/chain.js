@@ -125,14 +125,67 @@ export function createChainService({ contractFile, env = process.env, onChange =
   }
 
   // ---------------------------------------------------------------------
+  // Clôture automatique (rôle de Chainlink Automation)
+  // ---------------------------------------------------------------------
+  let keeperBusy = false;
+  // Lectures directes au nœud (send) : getBlock / getBlockNumber d'ethers gardent 250 ms en cache,
+  // assez pour manquer une transaction que le serveur vient lui-même d'envoyer.
+  const latestBlockTime = async p => Number((await p.send('eth_getBlockByNumber', ['latest', false])).timestamp);
+  let keeperRetryAt = 0;
+
+  /**
+   * Le serveur clôture lui-même les tirages : toujours en local (pas de Chainlink Automation sur Ganache),
+   * et sur Sepolia si une clé est configurée et que AUTO_CLOSE ne vaut pas « false ». Sinon, une tâche
+   * Chainlink Automation enregistrée sur l'usine, ou un joueur (bouton « Demander le tirage »), s'en charge.
+   */
+  function autoCloseEnabled() {
+    const cfg = getConfig();
+    if (!cfg?.factory || !cfg.abi?.factory?.some(f => f.name === 'performUpkeep')) return false; // ancien contrat
+    if (cfg.network === 'local') return true;
+    return env.AUTO_CLOSE !== 'false' && Boolean(rpcUrl(cfg)) && Boolean(env.FAUCET_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY);
+  }
+
+  async function autoClose(p, cfg) {
+    if (keeperBusy || Date.now() < keeperRetryAt || !autoCloseEnabled()) return;
+    keeperBusy = true;
+    try {
+      const factory = new Contract(cfg.factory, cfg.abi.factory, p);
+      const list = await factory.lotteries();
+      if (!list.length) return;
+      const current = list[list.length - 1];
+      const lottery = new Contract(current, cfg.abi.lottery, p);
+      const [status, deadline, total, requestedAt, timeout, block] = await Promise.all([
+        lottery.status(), lottery.deadline(), lottery.totalTickets(), lottery.drawRequestedAt(), lottery.ORACLE_TIMEOUT(), latestBlockTime(p),
+      ]);
+      // Heure de la blockchain. Sur Ganache, aucun bloc n'est produit sans transaction : le dernier peut dater,
+      // mais le prochain portera l'heure actuelle. Sur Sepolia, un bloc toutes les 12 s : on s'y fie.
+      const now = BigInt(isLocal() ? Math.max(block, Math.floor(Date.now() / 1000)) : block);
+      const closeSales = status === 0n && now >= deadline && total > 0n;
+      const cancelStale = status === 1n && now >= requestedAt + timeout;
+      if (!closeSales && !cancelStale) return;
+      const signer = await getSigner();
+      if (!signer) return;
+      // En local, l'estimation du gas de Ganache ignore l'heure du prochain bloc : on fixe une limite.
+      await (await factory.connect(signer).performUpkeep('0x', isLocal() ? { gasLimit: 800000 } : {})).wait();
+      log.log(`Clôture automatique : ${closeSales ? 'ventes closes, tirage demandé à l’oracle' : 'oracle muet, tirage annulé'} (${current}).`);
+    } catch (error) {
+      keeperRetryAt = Date.now() + 30000;
+      log.warn(`Clôture automatique impossible pour l’instant (${rpcReason(error) || error.shortMessage || error.message}) : nouvel essai dans 30 s.`);
+    } finally {
+      keeperBusy = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Surveillance des contrats
   // ---------------------------------------------------------------------
   async function tick() {
     const cfg = getConfig();
     const p = getProvider();
     if (!cfg?.factory || !p) return;
+    await autoClose(p, cfg); // avant la lecture des journaux : sur Ganache, sans transaction, aucun nouveau bloc
     try {
-      const latest = (await p.getBlockNumber()) - (isLocal() ? 0 : HEAD_LAG_BLOCKS);
+      const latest = Number(await p.send('eth_blockNumber', [])) - (isLocal() ? 0 : HEAD_LAG_BLOCKS);
       const firstRun = lastBlock === null;
       // Au démarrage, on relit l'historique récent pour servir une requête d'oracle restée en attente.
       if (firstRun) lastBlock = Math.max((cfg.deployBlock ?? latest) - 1, latest - 2000);
@@ -181,5 +234,5 @@ export function createChainService({ contractFile, env = process.env, onChange =
     timer = null;
   }
 
-  return { getConfig, faucetSettings, balanceOf, sendEth, start, stop, tick };
+  return { getConfig, faucetSettings, balanceOf, sendEth, start, stop, tick, autoCloseEnabled };
 }

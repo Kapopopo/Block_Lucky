@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { formatEther, isAddress, getAddress } from '/vendor/ethers.js';
 import { $, $$, api, toast, esc, short, sameAddress, setHTML, store, fmtEthPrecise } from './common.js';
+import { qrSvg } from './qr.js';
 import { signInWithEthereum } from './account.js';
 
 const MIN_BALANCE = 0.02; // de quoi acheter un ticket et payer les frais
@@ -41,16 +42,6 @@ function markDone(address) {
   if (!address || list.some(a => sameAddress(a, address))) return false;
   store.set('onboardingDone', JSON.stringify([...list, address.toLowerCase()].slice(-20)));
   return true;
-}
-
-/** QR code en SVG (bibliothèque chargée seulement quand on en a besoin). */
-let qrLib = null;
-async function qrSvg(text) {
-  qrLib ??= (await import('/vendor/qrcode.js')).default;
-  const qr = qrLib(0, 'M');
-  qr.addData(text);
-  qr.make();
-  return qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
 }
 
 export function initOnboarding(ctx) {
